@@ -1,26 +1,69 @@
 @import "tailwindcss";
 
+/* HeroUI applies these as the prelude for component styles. */
+@import "tw-animate-css";
+@import "@heroui/styles/utilities";
+@import "@heroui/styles/variants";
+@import "@heroui/styles/themes/default" layer(theme);
+@import "@heroui/styles/components/popover.css" layer(components);
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+
+  --background: #efe5cf;
+  --foreground: #2b2822;
+
+  --drawably-stroke: #2b2822;
+  --drawably-fill: #2b2822;
+  --drawably-paper: #fbf6e8;
+  --drawably-width: 2;
+
+  --overlay: var(--drawably-paper);
+  --overlay-shadow: 0 14px 36px rgb(43 40 34 / 0.18);
+
+  --parchis-red: #b63a2f;
+  --parchis-blue: #2f5c9a;
+  --parchis-yellow: #d9a62f;
+  --parchis-green: #3f7a4f;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: var(--font-open-runde);
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
 
 body {
-  background: var(--background);
+  background-color: var(--background);
+  background-image:
+    radial-gradient(
+      circle at 15% 10%,
+      color-mix(in srgb, var(--parchis-yellow) 12%, transparent),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at 85% 0%,
+      color-mix(in srgb, var(--parchis-blue) 10%, transparent),
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at 1px 1px,
+      rgb(43 40 34 / 0.045) 1px,
+      transparent 0
+    );
+  background-size: auto, auto, 18px 18px;
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-open-runde);
+}
+
+html .drawably-host,
+html .drawably-button,
+html .drawably-badge {
+  font-family: var(--font-open-runde);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--parchis-yellow) 55%, transparent);
+  color: var(--foreground);
 }
