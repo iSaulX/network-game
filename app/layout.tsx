@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import "drawably/style.css";
 import "./globals.css";
@@ -31,9 +31,28 @@ const openRunde = localFont({
 });
 
 export const metadata: Metadata = {
+  applicationName: "Parchís Stars",
   title: "Parchís Stars — Juega con amigos",
   description:
     "Parchís Stars: elige tu avatar, crea una partida o únete con un código y juega al Parchís con tus amigos.",
+  appleWebApp: {
+    capable: true,
+    title: "Parchís Stars",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    apple: "/icons/apple-touch-icon.png",
+  },
+  formatDetection: {
+    telephone: false,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#efe5cf",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -42,7 +61,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="es"
       className={`${openRunde.variable} ${openRunde.className} h-full antialiased`}
     >
-      <body className="flex min-h-full flex-col">{children}</body>
+      <body className="flex min-h-dvh flex-col">{children}</body>
     </html>
   );
 }

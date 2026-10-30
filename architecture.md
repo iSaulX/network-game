@@ -2,7 +2,7 @@
 
 > Living document. Every task must leave this file more accurate than it found it.
 
-_Last updated: 2026-10-20 (Task 01 implemented and revised; briefs 02–07 pending)_
+_Last updated: 2026-10-27 (Task 02 PWA shell implemented; briefs 03–07 pending)_
 
 ## Purpose
 
@@ -38,10 +38,10 @@ Parchís Stars, a networked Parchís game built with Next.js and a hand-drawn UI
 
 ```
 app/
-  layout.tsx      Root layout: OpenRunde local font, drawably stylesheet import, globals, Spanish metadata
+  layout.tsx      Root layout: OpenRunde local font, drawably stylesheet import, globals, Spanish metadata + viewport
   page.tsx        Homepage (implemented; profile/join/create cards + avatar popover)
-  manifest.ts     PWA web app manifest (pending Task 02)
-  globals.css     Tailwind import, HeroUI popover style prelude, paper theme, drawably variables
+  manifest.ts     PWA web app manifest (implemented; fullscreen display + placeholder icons)
+  globals.css     Tailwind import, HeroUI popover style prelude, paper theme, drawably variables, safe-area shell
   offline/        Offline fallback page (pending Task 05)
   bots/           Local 1-human-vs-3-bots mode (pending Task 06)
   versus/         1v1 P2P lobby + game (pending Task 07, gated)
@@ -56,7 +56,7 @@ components/
   game/           Reusable PixiJS game stage (pending Task 06)
 public/
   fonts/          OpenRunde Regular/Medium/Semibold/Bold (woff/otf)
-  icons/          PWA + Apple touch icons (placeholder artwork, pending Task 02)
+  icons/          PWA icons + Apple touch icon (placeholder artwork; a later icon task replaces it)
   pictures/       Avatar PFPs: dog, monkey, chicken, face, octupus, bee, unicorn, poop
   icon.png        Game icon used beside the Parchís Stars title
   sw.js           Generated service worker (gitignored, pending Task 05)
@@ -74,7 +74,7 @@ server.ts         Custom Node server: Next + /api/ws upgrade (pending Task 04)
 serwist.config.js Serwist precache/build config (pending Task 05)
 tasks/
   01-homepage.md  Homepage UI brief (complete; see results/01-homepage.md)
-  02-pwa.md       PWA shell brief (pending)
+  02-pwa.md       PWA shell brief (complete; see results/02-pwa.md)
   03-game-logic.md Parchís engine brief (pending)
   04-realtime-parties.md Party API + WebSocket brief (pending)
   05-offline-shell.md Offline app-shell/service-worker brief (pending)
@@ -119,13 +119,28 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 
 ## PWA
 
-- Installable, launching full screen: manifest `display: "fullscreen"` with a `display_override` fallback chain (`fullscreen` → `standalone` → `minimal-ui` → `browser`).
-- Icons live in `public/icons/` (192, 512, maskable 512, Apple touch 180). **Placeholder artwork** — a dedicated icon task will replace it.
-- Theme/background color comes from the paper UI palette; `themeColor` is configured through the `viewport` export, not `metadata`.
-- iOS support via `appleWebApp` metadata and `apple-touch-icon`.
-- Safe-area insets and `viewport-fit=cover` keep content clear of notches/home indicators in installed mode.
-- No service worker, offline caching, push notifications, or custom install prompt yet.
-- No in-app fullscreen toggle; full screen is provided by the installed display mode.
+- **Manifest route:** `app/manifest.ts` (Next.js metadata route) serves `/manifest.webmanifest`.
+  - `name` / `short_name`: "Parchís Stars"; `description` in Spanish; `lang: "es"`, `dir: "ltr"`, `categories: ["games"]`.
+  - `id`, `start_url`, and `scope` are all `/`.
+  - `display: "fullscreen"` with `display_override: ["fullscreen", "standalone", "minimal-ui", "browser"]`.
+  - `background_color` and `theme_color`: `#efe5cf`, the same value as the app's `--background` / body background. No separate palette.
+- **Icons:** static PNGs in `public/icons/`:
+  - `icon-192.png` (192×192, `any`)
+  - `icon-512.png` (512×512, `any`)
+  - `icon-maskable-512.png` (512×512, `maskable`; content inside the central ~60%, well within the 80% safe zone; full-bleed background)
+  - `apple-touch-icon.png` (180×180, opaque, no transparency)
+  - **Placeholder artwork:** cream `#efe5cf` background, a rough ink circle and four Parchís-colored dots. Generated once with a local Sharp script that was not committed; a later icon task replaces the files. Do not build UI around these images.
+- **Metadata (`app/layout.tsx`, server component):** `applicationName`, Spanish `title`/`description`, `appleWebApp: { capable: true, title: "Parchís Stars", statusBarStyle: "black-translucent" }`, `icons.apple: "/icons/apple-touch-icon.png"`, and `formatDetection: { telephone: false }`.
+  - Next 16 emits the standard `mobile-web-app-capable=yes` meta for `appleWebApp.capable`; it does not emit the legacy `apple-mobile-web-app-capable` tag.
+- **Viewport (`app/layout.tsx`):** `themeColor: "#efe5cf"` through the `viewport` export (not the deprecated `metadata.themeColor`), `width: "device-width"`, `initialScale: 1`, `viewportFit: "cover"`. Pinch zoom stays enabled (`maximumScale` / `userScalable` are intentionally unset) for accessibility.
+- **App-shell CSS (`app/globals.css`):**
+  - `html` and `body` set `background-color: var(--background)` so the paper color reaches the screen edges and overscroll areas.
+  - `body` sets `min-height: 100dvh` (the layout also uses `min-h-dvh`) and applies `env(safe-area-inset-top/right/bottom/left)` padding once at the shell level. DOM inside the shell must not add safe-area padding again.
+  - `overscroll-behavior: none` on both `html` and `body` disables pull-to-refresh and scroll bounce.
+  - `-webkit-tap-highlight-color: transparent` on `html`; text selection is not globally disabled and form fields remain selectable.
+- **Display behavior:** no JavaScript fullscreen toggle and no custom install prompt. The installed app's `display` mode provides full screen.
+- **Still absent:** service worker, offline caching, background sync, push notifications (Task 05).
+- **Platform caveat:** iOS does not implement `display: fullscreen`; "Add to Home Screen" launches in the standalone-style WebKit view. `display_override` and `fullscreen` apply to Chromium. iOS uses `appleWebApp.title` and `apple-touch-icon` for the home-screen name and icon.
 
 ### Offline shell (planned Task 05)
 
@@ -223,7 +238,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 ## Current status
 
 - **Task 01 — Homepage (UI only):** complete. See `results/01-homepage.md`.
-- **Task 02 — PWA shell (installable, full screen, placeholder icon):** pending.
+- **Task 02 — PWA shell (installable, full screen, placeholder icon):** complete. See `results/02-pwa.md`.
 - **Task 03 — Parchís game engine (Classic mode):** pending.
 - **Task 04 — Realtime parties (API routes + WebSockets):** pending.
 - **Task 05 — Offline app shell (service worker + cache):** pending.
