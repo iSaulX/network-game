@@ -2,7 +2,7 @@
 
 > Living document. Every task must leave this file more accurate than it found it.
 
-_Last updated: 2026-10-20 (Task 01 implemented and revised; briefs 02–07 pending)_
+_Last updated: 2026-10-30 (Tasks 01 and 03 implemented; briefs 02 and 04–07 pending)_
 
 ## Purpose
 
@@ -61,7 +61,7 @@ public/
   icon.png        Game icon used beside the Parchís Stars title
   sw.js           Generated service worker (gitignored, pending Task 05)
 lib/
-  parchis/        Pure classic Parchís engine (pending Task 03)
+  parchis/        Pure classic Parchís engine + bun tests (implemented, Task 03)
   party/          Shared protocol, transport/session abstractions, client API/WS/WebRTC
   server/party/   Server-only store, HTTP services, WS/signaling layer (pending Tasks 04/07)
   bots/           Pure local bot policy (pending Task 06)
@@ -75,7 +75,7 @@ serwist.config.js Serwist precache/build config (pending Task 05)
 tasks/
   01-homepage.md  Homepage UI brief (complete; see results/01-homepage.md)
   02-pwa.md       PWA shell brief (pending)
-  03-game-logic.md Parchís engine brief (pending)
+  03-game-logic.md Parchís engine brief (complete; see results/03-game-logic.md)
   04-realtime-parties.md Party API + WebSocket brief (pending)
   05-offline-shell.md Offline app-shell/service-worker brief (pending)
   06-bot-mode.md  Local 1-human-vs-3-bots brief (pending)
@@ -138,16 +138,29 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Offline indicator:** a small drawably "Sin conexión" badge driven by `online`/`offline` events.
 - **Boundary:** Task 05 makes the shell load offline; offline gameplay arrives in Task 06.
 
-## Game engine (planned)
+## Game engine (implemented, Task 03)
 
-- **Location:** `lib/parchis/` — pure TypeScript, no React, PixiJS, Next.js, or DOM imports.
-- **Ruleset:** Classic Parchís mode. One die; enter on 5; 6 grants an extra roll; 6 counts as 7 when all four tokens are out of the yard; capture +20 bonus; goal +10 bonus; barriers; three consecutive 6s penalty; exact roll to the goal.
-- **Classic vs Spanish mode:** classic forbids two different colours resting on the same safety square; Spanish mode (mixed-colour safe-square blockades) is out of scope.
-- **Board constants:** 68 outer squares; starts at 0/17/34/51 (red/blue/yellow/green); route progress 0–63 on the outer track, 64–70 in the private home column, 71 at the goal; 12 safe squares (starts + two per colour).
-- **State:** JSON-safe and fully public; deterministic actions with the die value supplied by the caller; actions implicitly taken by the current player.
-- **Phases:** `awaiting-roll` → `awaiting-move` (or `pass`) → optional `awaiting-bonus` → next turn / extra roll → `finished`.
-- **Tests:** `bun test`, including 500 seeded simulated games.
-- **Boundary:** the engine owns rules only. PixiJS renders the board; React/drawably render app chrome; networking will be a separate layer.
+- **Location:** `lib/parchis/`, imported as `@/lib/parchis`. Pure TypeScript with zero imports from React, PixiJS, Next.js, the DOM, or the network. No runtime dependencies.
+- **Modules:**
+  - `constants.ts` — board geometry and rule numbers (the contract the PixiJS board must render).
+  - `types.ts` — public JSON-safe types: `GameState`, `Player`, `Token`, `Move`, `BonusMove`, `GameEvent`, etc.
+  - `errors.ts` — `GameError` with stable `code`s: `INVALID_PLAYERS`, `INVALID_ROLL`, `INVALID_POSITION`, `WRONG_PHASE`, `ILLEGAL_MOVE`, `MUST_MOVE`, `INVALID_BONUS`, `GAME_OVER`, `INVALID_STATE`.
+  - `rules.ts` — pure read-only helpers: track mapping, occupancy, barriers, entry check, `checkAdvance`, `getLegalMoves`, `getLegalBonusMoves`, `validateState` (invariant checker).
+  - `engine.ts` — actions: `createGame`, `rollDie`, `roll`, `applyMove`, `pass`, `applyBonusMove`, `isFinished`, `getWinnerId`.
+  - `index.ts` — the only public entry point.
+  - `test-helpers.ts`, `*.test.ts` — test-only (position builder, deep-freeze, seeded `mulberry32`); not re-exported.
+  - `bun-test.d.ts` — minimal ambient types for `bun:test` so `tsc --noEmit` passes without adding `@types/bun` (delete it if `@types/bun` is ever added).
+- **Ruleset:** Classic Parchís mode. One die; enter only on 5 (mandatory when possible, a complete move, never captures); 6 grants an extra roll; 6 counts as 7 when no token is in the yard (goal tokens count as out); capture +20 bonus; goal +10 bonus; barriers; three consecutive 6s penalty; exact roll to the goal.
+- **Classic vs Spanish mode:** classic forbids two different colours resting on the same safety square (landing there is illegal, passing is allowed); Spanish mode is out of scope. Mixed-colour blockades cannot exist.
+- **Board constants:** 68 outer squares; starts at 0/17/34/51 (red/blue/yellow/green); route progress 0–63 on the outer track (absolute index `(start + progress) % 68`), 64–70 in the private home column, 71 at the goal; 12 safe squares `0, 4, 11, 17, 21, 28, 34, 38, 45, 51, 55, 62`. No colour's home entrance (progress 63) is a safe square.
+- **Occupancy:** max 2 tokens per outer square, same colour only. Two tokens form a barrier that blocks passing and landing for everyone (owner included). Home column and goal are private, unlimited and capture-free.
+- **State:** JSON-safe and fully public (`schemaVersion: 1`, `mode: "classic"`), no `Map`/`Set`/`Date`/functions. The die value is supplied by the caller (`rollDie(random)` is a helper). Actions are taken implicitly by the current player; the caller authenticates the sender.
+- **Purity:** every action validates first, then returns a new state built from copies; inputs (even deep-frozen) are never touched. On error the state is unchanged.
+- **Phases:** `awaiting-roll` → `roll` → `awaiting-move` → `applyMove` or `pass` (only when no legal move; never automatic) → optional `awaiting-bonus` (`applyBonusMove`, mandatory; auto-forfeited and logged when no legal bonus) → extra roll on a 6 (same seat, same `turn`) or next seat (`turn + 1`, roll/sixes/last-moved/bonus reset) → `finished` when one player has all four tokens at the goal.
+- **Three 6s:** handled inside `roll`; the third 6 never reaches `awaiting-move`. The token moved most recently this turn (normal or bonus move) returns to the yard only if it is on the outer track.
+- **Event log:** append-only `log` of `roll`, `enter`, `advance`, `capture`, `bonus-move`, `bonus-forfeited`, `pass`, `three-sixes`, `win`; every event carries its `turn`. UI layers animate from it.
+- **Tests:** `bun test` (49 tests: every edge case from the brief, plus 500 seeded random games with invariant checks after every action and a determinism replay check).
+- **Boundary:** the engine owns rules only. PixiJS renders the board; React/drawably render app chrome; networking (Task 04) and the local controller (Task 06) call these functions.
 
 ## Realtime parties and networking (planned Task 04)
 
@@ -224,7 +237,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 
 - **Task 01 — Homepage (UI only):** complete. See `results/01-homepage.md`.
 - **Task 02 — PWA shell (installable, full screen, placeholder icon):** pending.
-- **Task 03 — Parchís game engine (Classic mode):** pending.
+- **Task 03 — Parchís game engine (Classic mode):** complete. See `results/03-game-logic.md`.
 - **Task 04 — Realtime parties (API routes + WebSockets):** pending.
 - **Task 05 — Offline app shell (service worker + cache):** pending.
 - **Task 06 — Offline bot mode (1 human + 3 bots, PixiJS board):** pending.
