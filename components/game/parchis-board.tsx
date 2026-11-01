@@ -30,7 +30,11 @@ export interface ParchisBoardProps {
   state: GameState;
   /** Colour whose home is at the bottom-left; numbers start at its exit. */
   viewColor: ParchisColor;
-  /** Reports a tap on a legal chip; the page opens its move popover. */
+  /** Only this player's legal chips are pointer-selectable. */
+  humanPlayerId: string;
+  /** False during auto-play: the human's chips are not tappable. */
+  humanControlled?: boolean;
+  /** Reports a tap on a legal human chip; the page opens its move popover. */
   onTokenSelect: (tokenId: string) => void;
 }
 
@@ -43,6 +47,8 @@ export function ParchisBoard({
   className,
   state,
   viewColor,
+  humanPlayerId,
+  humanControlled = true,
   onTokenSelect,
 }: ParchisBoardProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -53,6 +59,8 @@ export function ParchisBoard({
   const fontFamilyRef = useRef("sans-serif");
   const stateRef = useRef<GameState>(state);
   const viewColorRef = useRef<ParchisColor>(viewColor);
+  const humanPlayerIdRef = useRef(humanPlayerId);
+  const humanControlledRef = useRef(humanControlled);
   const onTokenSelectRef = useRef(onTokenSelect);
   const redrawRef = useRef<(full?: boolean) => void>(() => {});
   const tokenPositionsRef = useRef<Map<string, { x: number; y: number }>>(
@@ -70,6 +78,16 @@ export function ParchisBoard({
     viewColorRef.current = viewColor;
     redrawRef.current(true);
   }, [viewColor]);
+
+  useEffect(() => {
+    humanPlayerIdRef.current = humanPlayerId;
+    redrawRef.current(true);
+  }, [humanPlayerId]);
+
+  useEffect(() => {
+    humanControlledRef.current = humanControlled;
+    redrawRef.current(true);
+  }, [humanControlled]);
 
   useEffect(() => {
     onTokenSelectRef.current = onTokenSelect;
@@ -203,13 +221,21 @@ export function ParchisBoard({
             ? getLegalBonusMoves(gameState)
             : [];
 
+      const currentPlayerId =
+        gameState.players[gameState.currentPlayerIndex]?.id;
+      const selectableTokenIds =
+        humanControlledRef.current &&
+        currentPlayerId === humanPlayerIdRef.current
+          ? moves.map((move) => move.tokenId)
+          : [];
+
       const targets = drawGameLayers(
         pixi,
         activeScene,
         {
           tokens: getTokenViews(gameState),
           destinations: getDestinationViews(gameState, moves),
-          selectableTokenIds: moves.map((move) => move.tokenId),
+          selectableTokenIds,
           onTokenTap: (tokenId) => onTokenSelectRef.current(tokenId),
         },
         {

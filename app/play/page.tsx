@@ -1,9 +1,12 @@
 "use client";
 
 import Image from "next/image";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
+  Suspense,
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -12,23 +15,30 @@ import {
   DrawablyBadge,
   DrawablyButton,
   DrawablyCard,
+  DrawablyCheckbox,
   DrawablyHighlight,
 } from "drawably/react";
 import { AvatarVisual } from "@/components/avatar-visual";
 import { ParchisBoard } from "@/components/game/parchis-board";
 import {
-  GAME_PLAYERS,
-  GAME_PLAYER_CONFIGS,
-  HUMAN_PROFILE,
-  getPlayerProfile,
+  createGameSetup,
+  getGameSettingsFromSearchParams,
   type GamePlayerProfile,
 } from "@/components/game/game-players";
 import { DiceCard } from "@/components/game/dice-card";
+import { useGameFeedback } from "@/components/game/game-feedback";
 import { PlayerPanel } from "@/components/game/player-panel";
+import { SoundSettingsPopover } from "@/components/game/sound-settings-popover";
+import {
+  chooseBonusMove as chooseBotBonusMove,
+  chooseBarrier as chooseBotBarrier,
+  chooseMove as chooseBotMove,
+} from "@/lib/bots/policy";
 import {
   getBoardFrameLayout,
   getViewCorner,
   type BoardCorner,
+  type ParchisColor,
 } from "@/lib/parchis/board-geometry";
 import {
   applyBonusMove,
@@ -55,18 +65,15 @@ import type {
 
 const UNIT_PERCENT = getBoardFrameLayout(100).unit;
 
-/** The human always sits bottom-left; the board and the rest rotate around it. */
-const VIEW_COLOR = HUMAN_PROFILE.color;
-
 const SEAT_CLASS: Readonly<Record<BoardCorner, string>> = Object.freeze({
   "top-left":
-    "order-1 justify-start lg:col-start-1 lg:row-start-1 lg:self-start",
+    "col-start-1 order-1 justify-start lg:col-start-1 lg:row-start-1 lg:self-start",
   "top-right":
-    "order-2 justify-start lg:col-start-3 lg:row-start-1 lg:self-start",
+    "col-start-2 order-2 justify-start lg:col-start-3 lg:row-start-1 lg:self-start",
   "bottom-left":
-    "order-4 justify-end lg:col-start-1 lg:row-start-2 lg:self-end",
+    "col-start-1 order-4 justify-end lg:col-start-1 lg:row-start-2 lg:self-end",
   "bottom-right":
-    "order-5 justify-end lg:col-start-3 lg:row-start-2 lg:self-end",
+    "col-start-2 order-5 justify-end lg:col-start-3 lg:row-start-2 lg:self-end",
 });
 
 function tokenNumber(tokenId: string): number {
@@ -83,7 +90,7 @@ function moveKey(move: Move | BonusMove): string {
 function destinationPhrase(
   profile: GamePlayerProfile,
   to: number,
-  viewColor: typeof VIEW_COLOR,
+  viewColor: ParchisColor,
 ): string {
   const destination = describeProgress(profile.color, to, viewColor);
   return destination.startsWith("el ")
@@ -94,7 +101,7 @@ function destinationPhrase(
 function moveActionLabel(
   profile: GamePlayerProfile,
   move: Move | BonusMove,
-  viewColor: typeof VIEW_COLOR,
+  viewColor: ParchisColor,
 ): string {
   if ("kind" in move) {
     return `Bono +${move.kind === "capture-20" ? 20 : 10}: mover ${destinationPhrase(
@@ -110,7 +117,7 @@ function moveActionLabel(
 function moveAriaLabel(
   profile: GamePlayerProfile,
   move: Move | BonusMove,
-  viewColor: typeof VIEW_COLOR,
+  viewColor: ParchisColor,
 ): string {
   return `Ficha ${tokenNumber(move.tokenId)}: ${moveActionLabel(
     profile,
@@ -183,7 +190,7 @@ function MovePopover({
   moves: readonly (Move | BonusMove)[];
   anchor: BoardPercentAnchor;
   gapPercent: number;
-  viewColor: typeof VIEW_COLOR;
+  viewColor: ParchisColor;
   onMove: (move: Move | BonusMove) => void;
   onClose: () => void;
 }) {
@@ -259,7 +266,7 @@ function KeyboardMoveTargets({
   profile: GamePlayerProfile;
   moves: readonly (Move | BonusMove)[];
   tokens: readonly PresentedToken[];
-  viewColor: typeof VIEW_COLOR;
+  viewColor: ParchisColor;
   onMove: (move: Move | BonusMove) => void;
 }) {
   if (moves.length === 0) return null;
@@ -290,29 +297,70 @@ function KeyboardMoveTargets({
   );
 }
 
+function PlayLoading() {
+  return (
+    <main className="grid min-h-dvh place-items-center px-4">
+      <p className="text-sm text-stone-500">Preparando la partida…</p>
+    </main>
+  );
+}
+
 export default function PlayPage() {
+  return (
+    <Suspense fallback={<PlayLoading />}>
+      <PlayPageContent />
+    </Suspense>
+  );
+}
+
+function PlayPageContent() {
   const router = useRouter();
+  const feedback = useGameFeedback();
+  const searchParams = useSearchParams();
+  const settings = useMemo(
+    () => getGameSettingsFromSearchParams(searchParams),
+    [searchParams],
+  );
+  const setup = useMemo(() => createGameSetup(settings), [settings]);
+  const profilesById = useMemo(
+    () =>
+      new Map(
+        setup.seats.map((profile) => [profile.id, profile] as const),
+      ),
+    [setup],
+  );
+  const viewColor = setup.human.color;
+
   const [game, setGame] = useState<GameState>(() =>
-    createGame(GAME_PLAYER_CONFIGS),
+    createGame(setup.configs),
   );
   const [menuTokenId, setMenuTokenId] = useState<string | null>(null);
   const [rolling, setRolling] = useState<{
     playerId: string;
     faces: [DieValue, DieValue];
   } | null>(null);
+  const [autoMode, setAutoMode] = useState(false);
+  const [soundMenuOpen, setSoundMenuOpen] = useState(false);
 
   const rollingLock = useRef(false);
   const rollTimeoutRef = useRef<number | null>(null);
   const rollIntervalRef = useRef<number | null>(null);
+  const botActionRef = useRef<() => void>(() => {});
+  const autoModeRef = useRef(autoMode);
+  const previousLogLengthRef = useRef(0);
+  const previousCurrentPlayerIdRef = useRef<string | null>(null);
 
   const legalMoves = getLegalMoves(game);
   const legalBonusMoves = getLegalBonusMoves(game);
   const currentPlayer = game.players[game.currentPlayerIndex];
   const currentProfile = currentPlayer
-    ? getPlayerProfile(currentPlayer.id)
+    ? profilesById.get(currentPlayer.id)
     : undefined;
+  const isHumanTurn =
+    game.phase !== "finished" && currentProfile?.id === setup.human.id;
+  const humanControlled = isHumanTurn && !autoMode;
   const winnerProfile = game.winnerId
-    ? getPlayerProfile(game.winnerId)
+    ? profilesById.get(game.winnerId)
     : undefined;
 
   const tokenViews = getTokenViews(game);
@@ -326,7 +374,7 @@ export default function PlayPage() {
     ? tokenViews.find((token) => token.id === menuTokenId)
     : undefined;
   const menuAnchor = menuToken
-    ? getBoardAnchorPercent(menuToken.anchor, VIEW_COLOR)
+    ? getBoardAnchorPercent(menuToken.anchor, viewColor)
     : null;
   const menuGap = menuToken
     ? (menuToken.radius + 0.5) * UNIT_PERCENT
@@ -377,53 +425,66 @@ export default function PlayPage() {
     [],
   );
 
-  const handleRoll = () => {
-    if (rollingLock.current || game.phase !== "awaiting-roll") return;
+  const handleRoll = useCallback(
+    (
+      durationMs = 750,
+      source: "user" | "auto" = "user",
+    ) => {
+      if (rollingLock.current || game.phase !== "awaiting-roll") return;
 
-    const faces = rollDice();
-    const playerId = currentPlayer?.id;
-    if (!playerId) return;
+      const rollDuration =
+        typeof durationMs === "number" && Number.isFinite(durationMs)
+          ? durationMs
+          : 750;
+      const faces = rollDice();
+      const playerId = currentPlayer?.id;
+      if (!playerId) return;
 
-    setMenuTokenId(null);
-
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setGame((current) =>
-        current.phase === "awaiting-roll" ? roll(current, faces) : current,
+      feedback.roll(
+        source === "user" && playerId === setup.human.id ? "human" : "bot",
       );
-      return;
-    }
+      setMenuTokenId(null);
 
-    rollingLock.current = true;
-    setRolling({ playerId, faces: rollDice() });
-
-    rollIntervalRef.current = window.setInterval(() => {
-      setRolling({ playerId, faces: rollDice() });
-    }, 90);
-
-    rollTimeoutRef.current = window.setTimeout(() => {
-      if (rollIntervalRef.current !== null) {
-        window.clearInterval(rollIntervalRef.current);
-        rollIntervalRef.current = null;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        setGame((current) =>
+          current.phase === "awaiting-roll" ? roll(current, faces) : current,
+        );
+        return;
       }
-      rollTimeoutRef.current = null;
-      rollingLock.current = false;
-      setRolling(null);
-      setGame((current) =>
-        current.phase === "awaiting-roll" ? roll(current, faces) : current,
-      );
-    }, 750);
-  };
 
-  const handleChooseBarrier = (progress: number) => {
+      rollingLock.current = true;
+      setRolling({ playerId, faces: rollDice() });
+
+      rollIntervalRef.current = window.setInterval(() => {
+        setRolling({ playerId, faces: rollDice() });
+      }, 90);
+
+      rollTimeoutRef.current = window.setTimeout(() => {
+        if (rollIntervalRef.current !== null) {
+          window.clearInterval(rollIntervalRef.current);
+          rollIntervalRef.current = null;
+        }
+        rollTimeoutRef.current = null;
+        rollingLock.current = false;
+        setRolling(null);
+        setGame((current) =>
+          current.phase === "awaiting-roll" ? roll(current, faces) : current,
+        );
+      }, rollDuration);
+    },
+    [currentPlayer, feedback, game.phase, setup.human.id],
+  );
+
+  const handleChooseBarrier = useCallback((progress: number) => {
     setMenuTokenId(null);
     setGame((current) =>
       current.phase === "awaiting-barrier"
         ? chooseBarrier(current, progress)
         : current,
     );
-  };
+  }, []);
 
-  const handleMove = (move: Move | BonusMove) => {
+  const handleMove = useCallback((move: Move | BonusMove) => {
     setMenuTokenId(null);
     setGame((current) => {
       try {
@@ -438,22 +499,131 @@ export default function PlayPage() {
       }
       return current;
     });
+  }, []);
+
+  const closeSoundMenu = useCallback(() => {
+    setSoundMenuOpen(false);
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>("[data-sound-trigger]")
+        ?.focus();
+    });
+  }, []);
+
+  const handleAutoChange = (next: boolean) => {
+    if (next === autoMode) return;
+    autoModeRef.current = next;
+    if (!next) {
+      // Regain the controls immediately: stop an in-flight auto roll. Any
+      // pending scheduler timer is also stopped by the effect cleanup; the
+      // bot action re-checks the ref so a timer firing in the same tick is safe.
+      cancelRollAnimation();
+    }
+    setMenuTokenId(null);
+    setAutoMode(next);
+    feedback.tap();
   };
 
   const handleReset = () => {
+    feedback.tap();
     cancelRollAnimation();
     setMenuTokenId(null);
-    setGame(createGame(GAME_PLAYER_CONFIGS));
+    setGame(createGame(setup.configs));
   };
+
+  const handleTokenSelect = (tokenId: string) => {
+    if (!humanControlled) return;
+    setMenuTokenId(tokenId);
+  };
+
+  useEffect(() => {
+    botActionRef.current = () => {
+      const controlledByHuman =
+        game.phase !== "finished" &&
+        currentPlayer?.id === setup.human.id &&
+        !autoModeRef.current;
+      if (game.phase === "finished" || controlledByHuman || rolling) return;
+
+      const playerId = currentPlayer?.id;
+      if (!playerId) return;
+
+      setMenuTokenId(null);
+
+      if (game.phase === "awaiting-roll") {
+        handleRoll(1000, "auto");
+        return;
+      }
+
+      if (game.phase === "awaiting-barrier") {
+        const progress = chooseBotBarrier(game, playerId);
+        if (progress !== null) handleChooseBarrier(progress);
+        return;
+      }
+
+      if (game.phase === "awaiting-bonus") {
+        const move = chooseBotBonusMove(game, playerId);
+        if (move) handleMove(move);
+        return;
+      }
+
+      if (game.phase === "awaiting-move") {
+        const move = chooseBotMove(game, playerId);
+        if (move) handleMove(move);
+      }
+    };
+  }, [
+    currentPlayer,
+    game,
+    handleChooseBarrier,
+    handleMove,
+    handleRoll,
+    humanControlled,
+    rolling,
+    setup.human.id,
+  ]);
+
+  useEffect(() => {
+    if (game.phase === "finished" || humanControlled || rolling !== null) return;
+
+    const timer = window.setTimeout(() => botActionRef.current(), 1000);
+    return () => window.clearTimeout(timer);
+  }, [game, humanControlled, rolling]);
+
+  useEffect(() => {
+    const previousLogLength = previousLogLengthRef.current;
+    previousLogLengthRef.current = game.log.length;
+
+    const previousCurrentPlayerId = previousCurrentPlayerIdRef.current;
+    const currentPlayerId =
+      game.players[game.currentPlayerIndex]?.id ?? null;
+    previousCurrentPlayerIdRef.current = currentPlayerId;
+
+    if (game.log.length > previousLogLength) {
+      feedback.events(game.log.slice(previousLogLength), setup.human.id, {
+        haptics: !autoMode,
+        automated: autoMode,
+      });
+    }
+
+    if (
+      !autoMode &&
+      previousCurrentPlayerId !== null &&
+      previousCurrentPlayerId !== setup.human.id &&
+      currentPlayerId === setup.human.id &&
+      game.phase !== "finished"
+    ) {
+      feedback.yourTurn();
+    }
+  }, [autoMode, feedback, game, setup.human.id]);
 
   const renderSeat = (profile: GamePlayerProfile) => {
     const dieView = dieViews.find((die) => die.playerId === profile.id);
     const active =
       game.phase !== "finished" && currentPlayer?.id === profile.id;
     const isRolling = rolling?.playerId === profile.id;
-    const corner = getViewCorner(profile.color, VIEW_COLOR);
+    const corner = getViewCorner(profile.color, viewColor);
     const bottom = corner.startsWith("bottom");
-    const human = profile.id === HUMAN_PROFILE.id;
+    const human = profile.id === setup.human.id;
     const values: readonly [DieValue | null, DieValue | null] =
       dieView?.values ?? [null, null];
     const used: readonly [boolean, boolean] = dieView?.used ?? [false, false];
@@ -464,6 +634,7 @@ export default function PlayPage() {
         active={active}
         winner={game.winnerId === profile.id}
         human={human}
+        auto={human && autoMode}
       />
     );
 
@@ -471,17 +642,29 @@ export default function PlayPage() {
       <DiceCard
         state={game}
         profile={profile}
-        viewColor={VIEW_COLOR}
+        viewColor={viewColor}
         values={values}
         used={used}
         active={active}
         human={human}
+        controllable={human && !autoMode}
         rolling={isRolling}
         rollingFaces={isRolling ? (rolling?.faces ?? null) : null}
         onRoll={handleRoll}
         onChooseBarrier={handleChooseBarrier}
       />
     );
+
+    const autoControl = human ? (
+      <label className="mx-auto flex w-fit cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1 text-xs font-medium text-stone-700">
+        <DrawablyCheckbox
+          checked={autoMode}
+          onChange={(event) => handleAutoChange(event.target.checked)}
+          className="shrink-0"
+        />
+        <span>Modo automático</span>
+      </label>
+    ) : null;
 
     return (
       <div
@@ -490,6 +673,7 @@ export default function PlayPage() {
         data-corner={corner}
         className={`flex min-w-0 flex-col gap-2 ${SEAT_CLASS[corner]}`}
       >
+        {human && autoControl}
         {bottom ? diceCard : panel}
         {bottom ? panel : diceCard}
       </div>
@@ -520,10 +704,28 @@ export default function PlayPage() {
                 Tablero de Parchís
               </DrawablyHighlight>
             </h1>
+            <div className="mt-1">
+              <DrawablyBadge
+                stroke={setup.human.accent}
+                className="px-2 py-0.5 text-[11px]"
+              >
+                {setup.mode === "1v1" ? "1 vs 1" : "Todos contra todos"}
+              </DrawablyBadge>
+            </div>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <form action="/alone" method="get">
+            <DrawablyButton
+              type="submit"
+              variant="outline"
+              onClick={() => feedback.tap()}
+              className="select-none px-4 py-2.5 text-sm"
+            >
+              Cambiar modo
+            </DrawablyButton>
+          </form>
           <DrawablyButton
             type="button"
             variant="outline"
@@ -535,7 +737,26 @@ export default function PlayPage() {
           <DrawablyButton
             type="button"
             variant="outline"
-            onClick={() => router.push("/")}
+            data-sound-trigger
+            aria-label="Ajustes de sonido"
+            aria-haspopup="dialog"
+            aria-expanded={soundMenuOpen}
+            aria-controls="sound-settings-dialog"
+            onClick={() => {
+              setSoundMenuOpen(true);
+              feedback.tap();
+            }}
+            className="select-none px-4 py-2.5 text-sm"
+          >
+            Sonido
+          </DrawablyButton>
+          <DrawablyButton
+            type="button"
+            variant="outline"
+            onClick={() => {
+              feedback.tap();
+              router.push("/");
+            }}
             className="select-none px-4 py-2.5 text-sm"
           >
             Volver al inicio
@@ -549,22 +770,25 @@ export default function PlayPage() {
             <div className="w-full overflow-hidden rounded-2xl shadow-[0_18px_45px_rgba(55,32,16,0.28)]">
               <ParchisBoard
                 state={game}
-                viewColor={VIEW_COLOR}
-                onTokenSelect={setMenuTokenId}
+                viewColor={viewColor}
+                humanPlayerId={setup.human.id}
+                humanControlled={humanControlled}
+                onTokenSelect={handleTokenSelect}
               />
             </div>
 
-            {currentProfile && (
+            {humanControlled && currentProfile && (
               <KeyboardMoveTargets
                 profile={currentProfile}
                 moves={allMoves}
                 tokens={tokenViews}
-                viewColor={VIEW_COLOR}
+                viewColor={viewColor}
                 onMove={handleMove}
               />
             )}
 
-            {currentProfile &&
+            {humanControlled &&
+              currentProfile &&
               menuToken &&
               menuAnchor &&
               menuMoves.length > 0 && (
@@ -574,7 +798,7 @@ export default function PlayPage() {
                   moves={menuMoves}
                   anchor={menuAnchor}
                   gapPercent={menuGap}
-                  viewColor={VIEW_COLOR}
+                  viewColor={viewColor}
                   onMove={handleMove}
                   onClose={() => setMenuTokenId(null)}
                 />
@@ -586,8 +810,17 @@ export default function PlayPage() {
           )}
         </div>
 
-        {GAME_PLAYERS.map(renderSeat)}
+        {setup.seats.map(renderSeat)}
       </div>
+
+      {soundMenuOpen && (
+        <SoundSettingsPopover
+          muted={feedback.soundMuted}
+          onToggle={feedback.setSoundMuted}
+          onToggleAll={feedback.setAllSoundsMuted}
+          onClose={closeSoundMenu}
+        />
+      )}
     </main>
   );
 }

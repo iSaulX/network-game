@@ -10,6 +10,8 @@ export interface PlayerPanelProps {
   winner: boolean;
   /** The bottom-left seat is the person using this device. */
   human: boolean;
+  /** The human's seat is currently played by the auto bot. */
+  auto?: boolean;
   className?: string;
 }
 
@@ -19,8 +21,10 @@ export function PlayerPanel({
   active,
   winner,
   human,
+  auto = false,
   className,
 }: PlayerPanelProps) {
+  const role = human ? (auto ? "Tú (auto)" : "Tú") : "Bot";
   const style = {
     "--drawably-stroke": profile.accent,
     background: active
@@ -32,7 +36,7 @@ export function PlayerPanel({
     <DrawablyCard
       className={`select-none p-3 ${className ?? ""}`}
       style={style}
-      aria-label={`${profile.name}${human ? ", tú" : ""}, color ${COLOR_NAMES[profile.color]}${active ? ", en turno" : ""}${winner ? ", ganador" : ""}.`}
+      aria-label={`${profile.name}${human ? (auto ? ", tú, modo automático" : ", tú") : ", bot"}, color ${COLOR_NAMES[profile.color]}${active ? ", en turno" : ""}${winner ? ", ganador" : ""}.`}
     >
       <div className="flex items-center gap-2.5">
         <span
@@ -48,7 +52,7 @@ export function PlayerPanel({
           </p>
           <p className="text-[11px] capitalize leading-tight text-stone-600">
             {COLOR_NAMES[profile.color]}
-            {human && <span className="normal-case"> · Tú</span>}
+            <span className="normal-case"> · {role}</span>
           </p>
         </div>
 

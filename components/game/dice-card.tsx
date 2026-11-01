@@ -24,6 +24,8 @@ export interface DiceCardProps {
   used: readonly [boolean, boolean];
   active: boolean;
   human: boolean;
+  /** False when the human's seat is on auto-play (no human controls). */
+  controllable: boolean;
   rolling: boolean;
   rollingFaces: readonly [DieValue, DieValue] | null;
   onRoll: () => void;
@@ -87,6 +89,7 @@ export function DiceCard({
   used,
   active,
   human,
+  controllable,
   rolling,
   rollingFaces,
   onRoll,
@@ -94,7 +97,13 @@ export function DiceCard({
 }: DiceCardProps) {
   const visibleValues = rolling && rollingFaces ? rollingFaces : values;
   const visibleUsed = rolling ? ([false, false] as const) : used;
-  const canRoll = active && state.phase === "awaiting-roll" && !rolling;
+  const auto = human && !controllable;
+  const canRoll =
+    active &&
+    human &&
+    controllable &&
+    state.phase === "awaiting-roll" &&
+    !rolling;
 
   const style = {
     "--drawably-stroke": active
@@ -131,7 +140,9 @@ export function DiceCard({
   const status = rolling
     ? "Tirando los dados."
     : active
-      ? "Turno activo."
+      ? auto
+        ? "Modo automático."
+        : "Turno activo."
       : "Esperando turno.";
 
   return (
@@ -143,7 +154,7 @@ export function DiceCard({
       {canRoll ? (
         <button
           type="button"
-          onClick={onRoll}
+          onClick={() => onRoll()}
           aria-label={human ? "Tirar tus dados" : `Tirar los dados de ${profile.name}`}
           className="block w-full cursor-pointer select-none rounded-xl p-1 transition-transform hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-800"
         >
@@ -155,7 +166,20 @@ export function DiceCard({
         </div>
       )}
 
+      {active && auto && (
+        <div className="mt-1 flex justify-center">
+          <DrawablyBadge
+            variant="scribble"
+            stroke={profile.accent}
+            className="px-1.5 py-0 text-[9px]"
+          >
+            Auto
+          </DrawablyBadge>
+        </div>
+      )}
+
       {active &&
+        controllable &&
         state.phase === "awaiting-barrier" &&
         state.barrierChoice && (
           <div className="mt-1.5 flex flex-col gap-1">
@@ -180,7 +204,7 @@ export function DiceCard({
           </div>
         )}
 
-      {active && state.phase === "awaiting-bonus" && (
+      {active && controllable && state.phase === "awaiting-bonus" && (
         <div className="mt-1 flex justify-center">
           <DrawablyBadge
             variant="scribble"

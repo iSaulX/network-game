@@ -12,6 +12,12 @@
       "sourceType": "github",
       "skillPath": "skills/web-design-guidelines/SKILL.md",
       "computedHash": "a6a44d5498f7e8f68289902f3dedfc6f38ae0cee1e96527c80724cf27f727c2a"
+    },
+    "web-haptics": {
+      "source": "lochie/web-haptics",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "92c57011fb13f28cf5c9e4964898f39a65666bc35343606fa348f19886b0a3d3"
     }
   }
 }
