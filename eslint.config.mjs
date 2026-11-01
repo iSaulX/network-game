@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Third-party skill examples are not application source.
+    ".agents/**",
+    // Generated from scripts/service-worker-template.js after `next build`.
+    "public/sw.js",
   ]),
 ]);
 

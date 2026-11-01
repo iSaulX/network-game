@@ -18,7 +18,6 @@ import {
   DrawablyCheckbox,
   DrawablyHighlight,
 } from "drawably/react";
-import { AvatarVisual } from "@/components/avatar-visual";
 import { ParchisBoard } from "@/components/game/parchis-board";
 import {
   createGameSetup,
@@ -26,6 +25,7 @@ import {
   type GamePlayerProfile,
 } from "@/components/game/game-players";
 import { DiceCard } from "@/components/game/dice-card";
+import { GameResultOverlay } from "@/components/game/game-result-overlay";
 import { useGameFeedback } from "@/components/game/game-feedback";
 import { PlayerPanel } from "@/components/game/player-panel";
 import { SoundSettingsPopover } from "@/components/game/sound-settings-popover";
@@ -76,6 +76,20 @@ const SEAT_CLASS: Readonly<Record<BoardCorner, string>> = Object.freeze({
     "col-start-2 order-5 justify-end lg:col-start-3 lg:row-start-2 lg:self-end",
 });
 
+function HeaderIcon({ src }: { src: string }) {
+  return (
+    <Image
+      src={src}
+      alt=""
+      width={1536}
+      height={1024}
+      sizes="36px"
+      aria-hidden="true"
+      className="h-6 w-9 shrink-0 object-contain"
+    />
+  );
+}
+
 function tokenNumber(tokenId: string): number {
   const suffix = Number(tokenId.slice(tokenId.lastIndexOf("-") + 1));
   return Number.isFinite(suffix) ? suffix + 1 : 1;
@@ -124,55 +138,6 @@ function moveAriaLabel(
     move,
     viewColor,
   )}`;
-}
-
-function WinnerPanel({
-  profile,
-  onReset,
-}: {
-  profile: GamePlayerProfile;
-  onReset: () => void;
-}) {
-  const style = {
-    "--drawably-stroke": profile.accent,
-    background: `color-mix(in srgb, ${profile.accent} 12%, var(--drawably-paper))`,
-  } as CSSProperties;
-
-  return (
-    <DrawablyCard
-      className="mt-3 select-none p-5"
-      style={style}
-      aria-live="assertive"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span
-            className="rounded-full p-0.5"
-            style={{ border: `2px solid ${profile.accent}` }}
-          >
-            <AvatarVisual image={profile.avatar} size="sm" />
-          </span>
-          <div>
-            <p className="text-sm font-semibold">
-              ¡{profile.name} gana la partida!
-            </p>
-            <p className="text-xs text-stone-600">
-              Sus cuatro fichas llegaron a la meta.
-            </p>
-          </div>
-        </div>
-
-        <DrawablyButton
-          type="button"
-          variant="solid"
-          onClick={onReset}
-          className="select-none px-4 py-2 text-sm"
-        >
-          Jugar de nuevo
-        </DrawablyButton>
-      </div>
-    </DrawablyCard>
-  );
 }
 
 function MovePopover({
@@ -362,6 +327,13 @@ function PlayPageContent() {
   const winnerProfile = game.winnerId
     ? profilesById.get(game.winnerId)
     : undefined;
+  const gameResult =
+    game.phase === "finished"
+      ? {
+          humanWon: game.winnerId === setup.human.id,
+          winnerName: winnerProfile?.name ?? "",
+        }
+      : null;
 
   const tokenViews = getTokenViews(game);
   const dieViews = getDieViews(game);
@@ -528,6 +500,7 @@ function PlayPageContent() {
     feedback.tap();
     cancelRollAnimation();
     setMenuTokenId(null);
+    setSoundMenuOpen(false);
     setGame(createGame(setup.configs));
   };
 
@@ -721,18 +694,20 @@ function PlayPageContent() {
               type="submit"
               variant="outline"
               onClick={() => feedback.tap()}
-              className="select-none px-4 py-2.5 text-sm"
+              className="flex select-none items-center gap-2 px-4 py-2.5 text-sm"
             >
-              Cambiar modo
+              <HeaderIcon src="/button-icons/change-mode.png" />
+              <span>Cambiar modo</span>
             </DrawablyButton>
           </form>
           <DrawablyButton
             type="button"
             variant="outline"
             onClick={handleReset}
-            className="select-none px-4 py-2.5 text-sm"
+            className="flex select-none items-center gap-2 px-4 py-2.5 text-sm"
           >
-            Nueva partida
+            <HeaderIcon src="/button-icons/new-game.png" />
+            <span>Nueva partida</span>
           </DrawablyButton>
           <DrawablyButton
             type="button"
@@ -746,9 +721,10 @@ function PlayPageContent() {
               setSoundMenuOpen(true);
               feedback.tap();
             }}
-            className="select-none px-4 py-2.5 text-sm"
+            className="flex select-none items-center gap-2 px-4 py-2.5 text-sm"
           >
-            Sonido
+            <HeaderIcon src="/button-icons/sound.png" />
+            <span>Sonido</span>
           </DrawablyButton>
           <DrawablyButton
             type="button"
@@ -757,9 +733,10 @@ function PlayPageContent() {
               feedback.tap();
               router.push("/");
             }}
-            className="select-none px-4 py-2.5 text-sm"
+            className="flex select-none items-center gap-2 px-4 py-2.5 text-sm"
           >
-            Volver al inicio
+            <HeaderIcon src="/button-icons/house.png" />
+            <span>Volver al inicio</span>
           </DrawablyButton>
         </div>
       </div>
@@ -804,21 +781,29 @@ function PlayPageContent() {
                 />
               )}
           </div>
-
-          {winnerProfile && (
-            <WinnerPanel profile={winnerProfile} onReset={handleReset} />
-          )}
         </div>
 
         {setup.seats.map(renderSeat)}
       </div>
 
-      {soundMenuOpen && (
+      {soundMenuOpen && !gameResult && (
         <SoundSettingsPopover
           muted={feedback.soundMuted}
           onToggle={feedback.setSoundMuted}
           onToggleAll={feedback.setAllSoundsMuted}
           onClose={closeSoundMenu}
+        />
+      )}
+
+      {gameResult && (
+        <GameResultOverlay
+          humanWon={gameResult.humanWon}
+          winnerName={gameResult.winnerName}
+          onPlayAgain={handleReset}
+          onGoHome={() => {
+            feedback.tap();
+            router.push("/");
+          }}
         />
       )}
     </main>

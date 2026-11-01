@@ -9,7 +9,7 @@ export default function manifest(): MetadataRoute.Manifest {
     description:
       "Juega al Parchís Stars con tus amigos: elige un avatar, comparte un código y tira los dados.",
     id: "/",
-    start_url: "/",
+    start_url: "/alone",
     scope: "/",
     display: "fullscreen",
     display_override: ["fullscreen", "standalone", "minimal-ui", "browser"],

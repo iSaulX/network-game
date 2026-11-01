@@ -2,6 +2,8 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import "drawably/style.css";
 import "./globals.css";
+import { OfflineIndicator } from "./offline-indicator";
+import { ServiceWorkerRegister } from "./service-worker-register";
 
 const openRunde = localFont({
   src: [
@@ -61,7 +63,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="es"
       className={`${openRunde.variable} ${openRunde.className} h-full antialiased`}
     >
-      <body className="flex min-h-dvh flex-col">{children}</body>
+      <body className="flex min-h-dvh flex-col">
+        <ServiceWorkerRegister />
+        <OfflineIndicator />
+        {children}
+      </body>
     </html>
   );
 }

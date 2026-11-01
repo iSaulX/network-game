@@ -17,6 +17,10 @@
 /.next/
 /out/
 
+# generated service worker (see scripts/generate-service-worker.mjs)
+/public/sw*
+/public/swe-worker*
+
 # production
 /build
 
