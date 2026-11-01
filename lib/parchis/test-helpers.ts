@@ -4,7 +4,7 @@
  */
 import { GOAL_PROGRESS, LAST_OUTER_PROGRESS, START_INDEX, TRACK_LENGTH } from "./constants";
 import { createGame } from "./engine";
-import type { Color, GameState } from "./types";
+import type { Color, DieValue, GameState } from "./types";
 
 /** Recursively freezes a value so any mutation throws in strict mode. */
 export function deepFreeze<T>(value: T): T {
@@ -36,21 +36,45 @@ export function makeState(
   positions: Record<string, number | null> = {},
   overrides: Partial<GameState> = {},
 ): GameState {
-  const base = createGame(colors.map((c) => ({ id: c, color: c })));
+  const base = createGame(colors.map((color) => ({ id: color, color })));
   const state: GameState = {
     ...base,
     ...overrides,
-    players: base.players.map((p) => ({
-      ...p,
-      tokens: p.tokens.map((t) => {
-        const progress = t.id in positions ? positions[t.id] : null;
-        if (progress === null) return { ...t, zone: "yard" as const, progress: null };
-        if (progress === GOAL_PROGRESS) return { ...t, zone: "goal" as const, progress };
-        return { ...t, zone: "path" as const, progress };
+    players: base.players.map((player) => ({
+      ...player,
+      tokens: player.tokens.map((token) => {
+        const progress = token.id in positions ? positions[token.id] : null;
+        if (progress === null) return { ...token, zone: "yard" as const, progress: null };
+        if (progress === GOAL_PROGRESS) return { ...token, zone: "goal" as const, progress };
+        return { ...token, zone: "path" as const, progress };
       }),
     })),
   };
   return deepFreeze(state);
+}
+
+/** A deeper-frozen state already in `awaiting-move` with both dice unspent. */
+export function makeRolledState(
+  colors: Color[],
+  positions: Record<string, number | null>,
+  dice: [DieValue, DieValue],
+  overrides: Partial<GameState> = {},
+): GameState {
+  return makeState(colors, positions, {
+    phase: "awaiting-move",
+    dice: [
+      { value: dice[0], used: false },
+      { value: dice[1], used: false },
+    ],
+    bonus: null,
+    barrierChoice: null,
+    ...overrides,
+  });
+}
+
+/** A move object for the current roll. */
+export function move(die: DieValue, tokenId: string, to: number) {
+  return { type: "ADVANCE" as const, tokenId, to, die };
 }
 
 /** Seeded PRNG returning floats in [0, 1). */
@@ -67,19 +91,19 @@ export function mulberry32(seed: number): () => number {
 
 /** Progress of a token by id. */
 export function progressOf(state: GameState, tokenId: string): number | null {
-  for (const p of state.players) {
-    const t = p.tokens.find((tok) => tok.id === tokenId);
-    if (t) return t.progress;
+  for (const player of state.players) {
+    const token = player.tokens.find((item) => item.id === tokenId);
+    if (token) return token.progress;
   }
   throw new Error(`No token ${tokenId}`);
 }
 
-/** Runs `fn` and returns the thrown error's `code` (or "NO_THROW"). */
+/** Runs `fn` and returns the thrown error's code (or "NO_THROW"). */
 export function errorCode(fn: () => unknown): string {
   try {
     fn();
-  } catch (e) {
-    return (e as { code?: string }).code ?? "UNKNOWN";
+  } catch (error) {
+    return (error as { code?: string }).code ?? "UNKNOWN";
   }
   return "NO_THROW";
 }

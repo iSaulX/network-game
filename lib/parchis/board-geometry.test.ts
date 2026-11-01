@@ -12,6 +12,7 @@ import {
   getBoardPositionsForCanvas,
   getBoardView,
   getViewBoardPositionsForCanvas,
+  getViewCorner,
   getViewSquareNumber,
   getViewSquarePosition,
   getCorridorCells,
@@ -206,12 +207,12 @@ describe("markings", () => {
     }
   });
 
-  test("the four brown safety squares are marked start + 7", () => {
-    expect(getMarkedSafeSquares()).toEqual([12, 29, 46, 63]);
+  test("the eight brown safety squares mirror the engine's safe set", () => {
+    expect(getMarkedSafeSquares()).toEqual([12, 17, 29, 34, 46, 51, 63, 68]);
 
     for (const square of getMarkedSafeSquares()) {
       expect(isMarkedSafeSquare(square)).toBe(true);
-      expect(getSquareInfo(square).kind).toBe("safe");
+      expect(["safe", "home-entrance"]).toContain(getSquareInfo(square).kind);
     }
 
     expect(getSquareInfo(5).kind).toBe("start");
@@ -413,6 +414,48 @@ describe("player view", () => {
         bottomLeft.x,
         bottomLeft.y,
       );
+    }
+  });
+
+  test("moves every colour's home to its view-relative corner", () => {
+    expect(
+      COLORS.map((color) => [color, getViewCorner(color, "blue")]),
+    ).toEqual([
+      ["red", "bottom-right"],
+      ["blue", "bottom-left"],
+      ["yellow", "top-right"],
+      ["green", "top-left"],
+    ]);
+
+    expect(
+      COLORS.map((color) => [color, getViewCorner(color, "green")]),
+    ).toEqual([
+      ["red", "top-right"],
+      ["blue", "bottom-right"],
+      ["yellow", "top-left"],
+      ["green", "bottom-left"],
+    ]);
+
+    expect(
+      COLORS.map((color) => [color, getViewCorner(color, "yellow")]),
+    ).toEqual([
+      ["red", "top-left"],
+      ["blue", "top-right"],
+      ["yellow", "bottom-left"],
+      ["green", "bottom-right"],
+    ]);
+
+    expect(
+      COLORS.map((color) => [color, getViewCorner(color, "red")]),
+    ).toEqual([
+      ["red", "bottom-left"],
+      ["blue", "top-left"],
+      ["yellow", "bottom-right"],
+      ["green", "top-right"],
+    ]);
+
+    for (const viewColor of COLORS) {
+      expect(getViewCorner(viewColor, viewColor)).toBe("bottom-left");
     }
   });
 

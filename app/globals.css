@@ -79,3 +79,28 @@ html .drawably-badge {
   background: color-mix(in srgb, var(--parchis-yellow) 55%, transparent);
   color: var(--foreground);
 }
+
+@keyframes drawably-dice-tumble {
+  0% {
+    transform: rotate(0deg) translateY(0);
+  }
+  35% {
+    transform: rotate(150deg) translateY(-3px);
+  }
+  70% {
+    transform: rotate(280deg) translateY(2px);
+  }
+  100% {
+    transform: rotate(360deg) translateY(0);
+  }
+}
+
+.dice-rolling {
+  animation: drawably-dice-tumble 0.42s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dice-rolling {
+    animation: none;
+  }
+}

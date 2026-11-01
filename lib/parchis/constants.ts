@@ -31,11 +31,8 @@ export const MAX_TOKENS_PER_SQUARE = 2;
 /** The die value that releases a token from the yard. */
 export const ENTRY_ROLL = 5;
 
-/** Movement distance of a 6 when all four tokens are out of the yard. */
-export const SIX_DISTANCE_ALL_OUT = 7;
-
-/** Number of consecutive 6s that triggers the penalty. */
-export const SIXES_PENALTY_COUNT = 3;
+/** Number of consecutive doubles that triggers the penalty. */
+export const DOUBLES_PENALTY_COUNT = 3;
 
 /** Bonus distances. */
 export const CAPTURE_BONUS_DISTANCE = 20;
@@ -55,8 +52,11 @@ export const START_INDEX: Readonly<Record<Color, number>> = {
 /** The four start squares (all safe). */
 export const START_SQUARES: readonly number[] = [0, 17, 34, 51];
 
-/** The eight non-start safe squares: start + 4 and start + 11 for each colour. */
-export const EXTRA_SAFE_SQUARES: readonly number[] = [4, 11, 21, 28, 38, 45, 55, 62];
+/**
+ * The eight non-start safe squares: start + 7 and start + 12 for each colour.
+ * These map to the brown/dark squares painted around the artwork's board.
+ */
+export const EXTRA_SAFE_SQUARES: readonly number[] = [7, 12, 24, 29, 41, 46, 58, 63];
 
 /** All 12 safe squares on the outer track, sorted. */
 export const SAFE_SQUARES: readonly number[] = [...START_SQUARES, ...EXTRA_SAFE_SQUARES].sort(

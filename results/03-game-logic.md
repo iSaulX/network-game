@@ -1,5 +1,7 @@
 # Task 03 — Parchís game engine (Classic mode): completion summary
 
+> **Historical note:** the engine was later extended to the two-dice variant requested by the project owner. See `results/playable-game.md` and the current `architecture.md`; the one-die rules and counts below are retained as the Task 03 record.
+
 Status: **complete**. All engine code and tests are in place; `bun test` and the TypeScript check pass. `bun run lint` could not be run in the implementation environment (see "Commands and results") and must be run once locally before merging.
 
 ## Files

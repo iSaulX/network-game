@@ -1,11 +1,16 @@
 /**
- * Public, JSON-safe types for the classic Parchís engine. The whole state is
- * public information, so it can be broadcast as-is by a network layer.
+ * Public, JSON-safe types for the two-dice classic Parchís engine. The whole
+ * state is public information, so it can be broadcast as-is by a network layer.
  */
 
 export type Color = "red" | "blue" | "yellow" | "green";
 export type Zone = "yard" | "path" | "goal";
-export type Phase = "awaiting-roll" | "awaiting-move" | "awaiting-bonus" | "finished";
+export type Phase =
+  | "awaiting-roll"
+  | "awaiting-move"
+  | "awaiting-barrier"
+  | "awaiting-bonus"
+  | "finished";
 export type BonusKind = "capture-20" | "home-10";
 export type DieValue = 1 | 2 | 3 | 4 | 5 | 6;
 
@@ -29,30 +34,55 @@ export interface PlayerConfig {
   color: Color;
 }
 
+/** One die of the current roll. A used die is spent for this turn. */
+export interface DieState {
+  value: DieValue;
+  used: boolean;
+}
+
 export interface ActiveBonus {
   kind: BonusKind;
   playerId: string;
 }
 
+/**
+ * Set while the current player must choose which own barrier two even dice
+ * will break. `squares` are the player's outer-track progress values.
+ */
+export interface BarrierChoice {
+  playerId: string;
+  squares: number[];
+}
+
 export interface GameState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   mode: "classic";
   players: Player[];
   currentPlayerIndex: number;
   phase: Phase;
-  lastRoll: DieValue | null;
-  /** Distance the current roll moves: a 6 becomes 7 when all tokens are out. */
-  moveDistance: number | null;
-  consecutiveSixes: number;
+  /** The current two-dice roll, or null between turns. */
+  dice: [DieState, DieState] | null;
+  /** Consecutive doubles in the current turn (extra rolls included). */
+  consecutiveDoubles: number;
   lastMovedTokenId: string | null;
   bonus: ActiveBonus | null;
+  barrierChoice: BarrierChoice | null;
   winnerId: string | null;
   /** Increments every time the current player changes. */
   turn: number;
   log: GameEvent[];
 }
 
-export type Move = { type: "ENTER"; tokenId: string } | { type: "ADVANCE"; tokenId: string; to: number };
+/**
+ * A player move spends exactly one remaining die. The two dice are never
+ * summed; applying both to the same token is two consecutive moves.
+ */
+export type Move = {
+  type: "ADVANCE";
+  tokenId: string;
+  to: number;
+  die: DieValue;
+};
 
 export interface BonusMove {
   kind: BonusKind;
@@ -61,13 +91,46 @@ export interface BonusMove {
 }
 
 /**
- * Append-only event log. UI layers animate from these events. Every event
- * carries the `turn` it happened in.
+ * Append-only event log. UI layers animate and narrate from these events.
+ * Every event carries the `turn` it happened in.
  */
 export type GameEvent =
-  | { type: "roll"; turn: number; playerId: string; value: DieValue; moveDistance: number }
-  | { type: "enter"; turn: number; playerId: string; tokenId: string }
-  | { type: "advance"; turn: number; playerId: string; tokenId: string; from: number; to: number }
+  | {
+      type: "roll";
+      turn: number;
+      playerId: string;
+      dice: [DieValue, DieValue];
+    }
+  | {
+      type: "enter";
+      turn: number;
+      playerId: string;
+      tokenId: string;
+      /** The 5 that opened the yard, or null for a sum-of-five entry. */
+      die: DieValue | null;
+    }
+  | {
+      type: "advance";
+      turn: number;
+      playerId: string;
+      tokenId: string;
+      from: number;
+      to: number;
+      die: DieValue;
+    }
+  | {
+      type: "barrier-break";
+      turn: number;
+      playerId: string;
+      tokenId: string;
+      from: number;
+      to: number;
+      die: DieValue;
+      /** The player's progress value of the barrier square. */
+      square: number;
+      /** True when the engine picked the barrier automatically. */
+      automatic: boolean;
+    }
   | {
       type: "capture";
       turn: number;
@@ -87,9 +150,14 @@ export type GameEvent =
       to: number;
     }
   | { type: "bonus-forfeited"; turn: number; playerId: string; kind: BonusKind }
-  | { type: "pass"; turn: number; playerId: string; value: DieValue }
   | {
-      type: "three-sixes";
+      type: "pass";
+      turn: number;
+      playerId: string;
+      dice: [DieValue, DieValue] | null;
+    }
+  | {
+      type: "three-doubles";
       turn: number;
       playerId: string;
       /** Token sent back to the yard, or null when none was eligible. */

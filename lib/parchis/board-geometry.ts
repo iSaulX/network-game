@@ -23,6 +23,12 @@ export type ParchisColor = "red" | "blue" | "yellow" | "green";
 
 export type BoardSide = "top" | "right" | "bottom" | "left";
 
+export type BoardCorner =
+  | "top-left"
+  | "top-right"
+  | "bottom-right"
+  | "bottom-left";
+
 export type SquareKind = "start" | "safe" | "home-entrance" | "track";
 
 export interface BoardPoint {
@@ -72,7 +78,7 @@ export interface GoalTriangle extends UnitPolygon {
 }
 
 export interface ColorLayout {
-  readonly corner: "top-left" | "top-right" | "bottom-right" | "bottom-left";
+  readonly corner: BoardCorner;
   /** Display square on which tokens of this colour enter the track. */
   readonly startSquare: number;
   /** Display square at the arm tip where the private corridor begins. */
@@ -244,7 +250,15 @@ const ENTRANCE_COLOR: Readonly<Record<number, ParchisColor>> = Object.freeze({
   68: "green",
 });
 
-const MARKED_SAFE_SQUARES: readonly number[] = Object.freeze([12, 29, 46, 63]);
+/**
+ * The eight brown/dark safe squares painted around the map. Mirrors the
+ * engine rule (start + 7 and start + 12 for every colour) so the artwork never
+ * tells players that a square is safe when the engine disagrees. Four of these
+ * cells are also corridor tips, classified as `home-entrance` below.
+ */
+const MARKED_SAFE_SQUARES: readonly number[] = Object.freeze([
+  12, 17, 29, 34, 46, 51, 63, 68,
+]);
 const MARKED_SAFE_SET = new Set(MARKED_SAFE_SQUARES);
 
 const ROTATION: Readonly<Record<BoardSide, number>> = Object.freeze({
@@ -685,6 +699,35 @@ export function getViewSquareNumber(
   );
 }
 
+const CORNER_POINTS: Readonly<Record<BoardCorner, BoardPoint>> = Object.freeze({
+  "top-left": Object.freeze({ x: 0, y: 0 }),
+  "top-right": Object.freeze({ x: 1, y: 0 }),
+  "bottom-right": Object.freeze({ x: 1, y: 1 }),
+  "bottom-left": Object.freeze({ x: 0, y: 1 }),
+});
+
+/**
+ * Where a colour's home appears in another colour's player-relative view. The
+ * viewer's own home is always bottom-left; the rest follow the board rotation.
+ */
+export function getViewCorner(
+  color: ParchisColor,
+  viewColor: ParchisColor,
+): BoardCorner {
+  const point = rotateAround(
+    CORNER_POINTS[COLOR_LAYOUT[color].corner],
+    getBoardView(viewColor).rotation,
+    0.5,
+    0.5,
+  );
+
+  if (point.x < 0.5) {
+    return point.y < 0.5 ? "top-left" : "bottom-left";
+  }
+
+  return point.y < 0.5 ? "top-right" : "bottom-right";
+}
+
 /** Rotate a board-unit point around the play centre. */
 export function rotateUnitPoint(
   anchor: BoardPoint,
@@ -729,8 +772,9 @@ export function isHomeEntranceSquare(square: number): boolean {
 }
 
 /**
- * The four brown squares painted with a safety mark in the reference artwork
- * (start + 7). This is visual metadata, not the engine's safe-square rule.
+ * The brown/dark squares painted as safety marks around the reference artwork
+ * (start + 7 and start + 12). The four starts are also safe but keep their
+ * corridor colour.
  */
 export function getMarkedSafeSquares(): readonly number[] {
   return MARKED_SAFE_SQUARES;

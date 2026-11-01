@@ -6,6 +6,7 @@ export type GameErrorCode =
   | "ILLEGAL_MOVE"
   | "MUST_MOVE"
   | "INVALID_BONUS"
+  | "INVALID_BARRIER"
   | "GAME_OVER"
   | "INVALID_STATE";
 

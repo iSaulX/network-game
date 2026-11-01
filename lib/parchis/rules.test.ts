@@ -1,163 +1,200 @@
 import { describe, expect, test } from "bun:test";
 import {
-  HOME_COLUMN_START,
+  COLORS,
   SAFE_SQUARES,
   START_INDEX,
   absoluteTrackIndex,
+  getBarrierBreakMoves,
   getLegalMoves,
+  getOwnBarriers,
   isSafeTrackIndex,
-  roll,
-  applyMove,
-  pass,
-  COLORS,
 } from "./index";
-import { errorCode, makeState, progressAt, progressOf } from "./test-helpers";
-
-const RED_ALL_OUT = { "red-1": 30, "red-2": 40, "red-3": 50 }; // avoids mandatory-entry on 5
+import { errorCode, makeRolledState, move, progressAt } from "./test-helpers";
 
 describe("board constants", () => {
-  test("12 safe squares: starts plus start+4 and start+11", () => {
-    expect(SAFE_SQUARES).toEqual([0, 4, 11, 17, 21, 28, 34, 38, 45, 51, 55, 62]);
+  test("12 safe squares: starts plus start+7 and start+12", () => {
+    expect(SAFE_SQUARES).toEqual([0, 7, 12, 17, 24, 29, 34, 41, 46, 51, 58, 63]);
     for (const color of COLORS) {
-      const s = START_INDEX[color];
-      expect(isSafeTrackIndex(s)).toBeTrue();
-      expect(isSafeTrackIndex((s + 4) % 68)).toBeTrue();
-      expect(isSafeTrackIndex((s + 11) % 68)).toBeTrue();
+      const start = START_INDEX[color];
+      expect(isSafeTrackIndex(start)).toBeTrue();
+      expect(isSafeTrackIndex((start + 7) % 68)).toBeTrue();
+      expect(isSafeTrackIndex((start + 12) % 68)).toBeTrue();
     }
     expect(isSafeTrackIndex(5)).toBeFalse();
   });
 
-  test("absoluteTrackIndex wraps and covers 64 squares, skipping the 4 before the start", () => {
+  test("absoluteTrackIndex wraps and rejects non-outer progress", () => {
     expect(absoluteTrackIndex("red", 0)).toBe(0);
-    expect(absoluteTrackIndex("red", 63)).toBe(63);
     expect(absoluteTrackIndex("blue", 0)).toBe(17);
     expect(absoluteTrackIndex("green", 20)).toBe(3);
-    for (const color of COLORS) {
-      const visited = new Set<number>();
-      for (let p = 0; p <= 63; p++) visited.add(absoluteTrackIndex(color, p));
-      expect(visited.size).toBe(64);
-      for (let k = 1; k <= 4; k++) expect(visited.has((START_INDEX[color] - k + 68) % 68)).toBeFalse();
-    }
-  });
-
-  test("absoluteTrackIndex rejects positions off the outer track", () => {
     expect(errorCode(() => absoluteTrackIndex("red", 64))).toBe("INVALID_POSITION");
     expect(errorCode(() => absoluteTrackIndex("red", -1))).toBe("INVALID_POSITION");
   });
 });
 
-describe("16. no capture on safe squares", () => {
-  test("cannot land on an opponent on a non-start safe square", () => {
-    const s = roll(makeState(["red", "yellow"], { "red-0": 1, ...RED_ALL_OUT, "yellow-0": progressAt("yellow", 4) }), 3);
-    expect(getLegalMoves(s).some((m) => m.tokenId === "red-0")).toBeFalse();
-  });
-
-  test("cannot land on an opponent sitting on a start square", () => {
-    const s = roll(makeState(["red", "blue"], { "red-0": 14, ...RED_ALL_OUT, "blue-0": 0 }), 3);
-    expect(getLegalMoves(s).some((m) => m.tokenId === "red-0")).toBeFalse();
-  });
-});
-
-describe("17. classic safe-square rule", () => {
-  test("different colour cannot land, may pass over, same colour may land and form a barrier", () => {
-    const yellowOn4 = { "yellow-0": progressAt("yellow", 4) };
-    const land = roll(makeState(["red", "yellow"], { "red-0": 0, ...RED_ALL_OUT, ...yellowOn4 }), 4);
-    expect(getLegalMoves(land).some((m) => m.tokenId === "red-0")).toBeFalse();
-
-    const passOver = roll(makeState(["red", "yellow"], { "red-0": 1, ...RED_ALL_OUT, ...yellowOn4 }), 4);
-    expect(getLegalMoves(passOver)).toContainEqual({ type: "ADVANCE", tokenId: "red-0", to: 5 });
-
-    const own = roll(makeState(["red", "yellow"], { "red-0": 0, "red-1": 4, "red-2": 40, "red-3": 50 }), 4);
-    const after = applyMove(own, { type: "ADVANCE", tokenId: "red-0", to: 4 });
-    expect(progressOf(after, "red-0")).toBe(4);
-    expect(progressOf(after, "red-1")).toBe(4);
-  });
-});
-
-describe("18. barriers and single tokens", () => {
-  test("a single opponent token does not block passage", () => {
-    const s = roll(makeState(["red", "yellow"], { "red-0": 10, ...RED_ALL_OUT, "yellow-0": progressAt("yellow", 12) }), 4);
-    expect(getLegalMoves(s)).toContainEqual({ type: "ADVANCE", tokenId: "red-0", to: 14 });
-  });
-
-  test("an opponent barrier blocks passing and landing", () => {
-    const y = progressAt("yellow", 12);
-    const base = { "red-0": 10, ...RED_ALL_OUT, "yellow-0": y, "yellow-1": y };
-    expect(getLegalMoves(roll(makeState(["red", "yellow"], base), 4)).some((m) => m.tokenId === "red-0")).toBeFalse();
-    expect(getLegalMoves(roll(makeState(["red", "yellow"], base), 2)).some((m) => m.tokenId === "red-0")).toBeFalse();
-  });
-
-  test("an own barrier blocks the owner's other tokens too", () => {
-    const base = { "red-0": 10, "red-1": 12, "red-2": 12, "red-3": 50 };
-    expect(getLegalMoves(roll(makeState(["red", "yellow"], base), 4)).some((m) => m.tokenId === "red-0")).toBeFalse();
-    expect(getLegalMoves(roll(makeState(["red", "yellow"], base), 2)).some((m) => m.tokenId === "red-0")).toBeFalse();
-  });
-});
-
-describe("19. barrier tokens can move out", () => {
-  test("moving one token out opens the barrier", () => {
-    const s = roll(makeState(["red", "yellow"], { "red-0": 12, "red-1": 12, "red-2": 10, "red-3": 50 }), 3);
-    expect(getLegalMoves(s)).toContainEqual({ type: "ADVANCE", tokenId: "red-0", to: 15 });
-    expect(getLegalMoves(s).some((m) => m.tokenId === "red-2")).toBeFalse(); // 10→13 passes the barrier
-    const opened = applyMove(s, { type: "ADVANCE", tokenId: "red-0", to: 15 });
-    // Next red roll: red-2 can now pass square 12 (only one token left there).
-    const again = roll({ ...opened, currentPlayerIndex: 0, phase: "awaiting-roll" }, 4);
-    expect(getLegalMoves(again)).toContainEqual({ type: "ADVANCE", tokenId: "red-2", to: 14 });
-  });
-});
-
-describe("20. at most two tokens per outer square", () => {
-  test("a third token of any colour cannot land", () => {
-    const y = progressAt("yellow", 14);
-    const s = roll(makeState(["red", "yellow"], { "red-0": 10, ...RED_ALL_OUT, "yellow-0": y, "yellow-1": y }), 4);
-    expect(getLegalMoves(s).some((m) => m.tokenId === "red-0")).toBeFalse();
-    const own = roll(makeState(["red", "yellow"], { "red-0": 10, "red-1": 14, "red-2": 14, "red-3": 50 }), 4);
-    expect(getLegalMoves(own).some((m) => m.tokenId === "red-0")).toBeFalse();
-  });
-});
-
-describe("21. home column and goal are private", () => {
-  test("no occupancy limit and no barriers in the home column", () => {
-    const s = roll(makeState(["red", "yellow"], { "red-0": 60, "red-1": 66, "red-2": 66, "red-3": 63 }), 6);
-    // 6 counts 7 (all out): red-0 60→67 passes the two tokens on 66; red-3 63→70.
-    expect(s.moveDistance).toBe(7);
-    expect(getLegalMoves(s)).toContainEqual({ type: "ADVANCE", tokenId: "red-0", to: 67 });
-    expect(getLegalMoves(s)).toContainEqual({ type: "ADVANCE", tokenId: "red-3", to: 70 });
-    const stack = roll(makeState(["red", "yellow"], { "red-0": 63, "red-1": 66, "red-2": 66, "red-3": 40 }), 3);
-    expect(getLegalMoves(stack)).toContainEqual({ type: "ADVANCE", tokenId: "red-0", to: 66 });
-  });
-
-  test("home columns of different colours never interact", () => {
-    const s = roll(makeState(["red", "blue"], { "red-0": 61, ...RED_ALL_OUT, "blue-0": 64, "blue-1": 64 }), 3);
-    expect(getLegalMoves(s)).toContainEqual({ type: "ADVANCE", tokenId: "red-0", to: HOME_COLUMN_START });
-  });
-});
-
-describe("22. home entrance (progress 63)", () => {
-  test("no colour's home entrance is a safe square", () => {
-    for (const color of COLORS) expect(isSafeTrackIndex(absoluteTrackIndex(color, 63))).toBeFalse();
-  });
-
-  test("an opponent on the entrance can be captured and a barrier there blocks", () => {
-    const y = progressAt("yellow", 63);
-    const cap = roll(makeState(["red", "yellow"], { "red-0": 60, "red-1": 20, "red-2": 40, "red-3": 50, "yellow-0": y }), 3);
-    const after = applyMove(cap, { type: "ADVANCE", tokenId: "red-0", to: 63 });
-    expect(progressOf(after, "yellow-0")).toBeNull();
-
-    const block = roll(
-      makeState(["red", "yellow"], { "red-0": 60, ...RED_ALL_OUT, "yellow-0": y, "yellow-1": y }),
-      6,
+describe("legal moves and occupancy", () => {
+  test("a two-token barrier blocks passage and landing", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 10, "red-1": 12, "red-2": 12 },
+      [4, 1],
     );
-    expect(getLegalMoves(block).some((m) => m.tokenId === "red-0")).toBeFalse();
+    const moves = getLegalMoves(state);
+
+    expect(moves).not.toContainEqual(move(4, "red-0", 14));
+    expect(moves).toContainEqual(move(1, "red-0", 11));
+  });
+
+  test("a single token does not block passage", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 10, "red-1": 12 },
+      [4, 2],
+    );
+
+    expect(getLegalMoves(state)).toContainEqual(move(4, "red-0", 14));
+  });
+
+  test("a token that is part of a barrier can move out", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 12, "red-1": 12 },
+      [1, 2],
+    );
+    const moves = getLegalMoves(state);
+
+    expect(moves).toContainEqual(move(1, "red-0", 13));
+    expect(moves).toContainEqual(move(1, "red-1", 13));
+  });
+
+  test("landing on two tokens is illegal", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 10, "red-1": 14, "red-2": 14 },
+      [4, 2],
+    );
+
+    expect(getLegalMoves(state)).not.toContainEqual(move(4, "red-0", 14));
+  });
+
+  test("same-colour tokens may share a safe square and form a barrier", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 3, "red-1": 4 },
+      [1, 2],
+    );
+
+    expect(getLegalMoves(state)).toContainEqual(move(1, "red-0", 4));
+  });
+
+  test("classic mode forbids landing on an occupied safe square", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      {
+        "red-0": 11,
+        "yellow-0": progressAt("yellow", 12),
+      },
+      [1, 2],
+    );
+
+    expect(getLegalMoves(state)).not.toContainEqual(move(1, "red-0", 12));
+  });
+
+  test("passing over a safe square is allowed", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      {
+        "red-0": 9,
+        "yellow-0": progressAt("yellow", 12),
+      },
+      [4, 2],
+    );
+
+    expect(getLegalMoves(state)).toContainEqual(move(4, "red-0", 13));
+  });
+
+  test("landing on a single opponent on a non-safe square captures", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      {
+        "red-0": 10,
+        "yellow-0": progressAt("yellow", 14),
+      },
+      [4, 2],
+    );
+
+    expect(getLegalMoves(state)).toContainEqual(move(4, "red-0", 14));
+  });
+
+  test("the goal needs an exact roll and goal tokens never move", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 70, "red-1": 71 },
+      [2, 1],
+    );
+    const moves = getLegalMoves(state);
+
+    expect(moves).toContainEqual(move(1, "red-0", 71));
+    expect(moves).not.toContainEqual(move(2, "red-0", 72));
+    expect(moves.some((item) => item.tokenId === "red-1")).toBeFalse();
+  });
+
+  test("home-column moves are private and unlimited", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 64, "red-1": 64 },
+      [6, 1],
+    );
+    const moves = getLegalMoves(state);
+
+    expect(moves).toContainEqual(move(6, "red-0", 70));
+    expect(moves).toContainEqual(move(6, "red-1", 70));
   });
 });
 
-describe("23. no legal moves when everything is blocked", () => {
-  test("barrier, occupancy and overshoot leave no moves; pass is then allowed", () => {
-    const y = progressAt("yellow", 12);
-    const s = roll(makeState(["red", "yellow"], { "red-0": 10, "red-1": 69, "yellow-0": y, "yellow-1": y }), 4);
-    expect(getLegalMoves(s)).toEqual([]);
-    const passed = pass(s);
-    expect(passed.currentPlayerIndex).toBe(1);
+describe("own barriers", () => {
+  test("detects a pair of own tokens on one outer square", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 10, "red-1": 10, "red-2": 30 },
+      [2, 4],
+    );
+    const barriers = getOwnBarriers(state, state.players[0]);
+
+    expect(barriers).toHaveLength(1);
+    expect(barriers[0].progress).toBe(10);
+    expect(barriers[0].tokens.map((token) => token.id)).toEqual([
+      "red-0",
+      "red-1",
+    ]);
+  });
+
+  test("barrier break moves leave one token behind", () => {
+    const state = makeRolledState(
+      ["red", "yellow"],
+      { "red-0": 10, "red-1": 10 },
+      [2, 4],
+    );
+    const moves = getBarrierBreakMoves(state, state.players[0], 10);
+
+    expect(moves).toContainEqual(move(2, "red-0", 12));
+    expect(moves).toContainEqual(move(4, "red-0", 14));
+    expect(moves).toContainEqual(move(2, "red-1", 12));
+    expect(moves).toContainEqual(move(4, "red-1", 14));
+  });
+
+  test("a blocked barrier has no break moves", () => {
+    const state = makeRolledState(
+      ["red", "blue"],
+      {
+        "red-0": 10,
+        "red-1": 10,
+        "blue-0": 63,
+        "blue-1": 63,
+      },
+      [2, 4],
+    );
+
+    expect(getBarrierBreakMoves(state, state.players[0], 10)).toEqual([]);
   });
 });

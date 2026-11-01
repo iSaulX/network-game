@@ -8,6 +8,10 @@ import {
   type BoardPoint,
   type ParchisColor,
 } from "@/lib/parchis/board-geometry";
+import type {
+  PresentedDestination,
+  PresentedToken,
+} from "@/lib/parchis/presentation";
 
 export type PixiModule = typeof import("pixi.js");
 
@@ -66,11 +70,51 @@ const GOAL_COLOR: Readonly<Record<ParchisColor, number>> = Object.freeze({
   red: 0xe65449,
 });
 
+/** Chip artwork for each colour. A missing colour is simply not drawn. */
+export type TokenTextures = Readonly<Partial<Record<ParchisColor, PIXI.Texture>>>;
+
+/** A chip container plus its target position, used for smooth interpolation. */
+export interface TokenDrawTarget {
+  readonly id: string;
+  readonly container: PIXI.Container;
+  readonly x: number;
+  readonly y: number;
+}
+
 export interface DrawBoardOptions {
   width: number;
   height: number;
   fontFamily: string;
-  playerColor: ParchisColor;
+  /** `null` keeps the artwork's physical orientation and numbering. */
+  viewColor: ParchisColor | null;
+}
+
+/**
+ * Static board plus the empty layers that change during a game. Keeping the
+ * board in its own scene means a roll or a move only redraws the pieces, dice,
+ * and destination markers instead of the hundreds of grain and ink strokes.
+ */
+export interface BoardScene {
+  readonly root: PIXI.Container;
+  readonly playRoot: PIXI.Container;
+  readonly destinationLayer: PIXI.Container;
+  readonly tokenLayer: PIXI.Container;
+  readonly canvasWidth: number;
+  readonly canvasHeight: number;
+  readonly playX: number;
+  readonly playY: number;
+  readonly playSize: number;
+  readonly frameWidth: number;
+  readonly unit: number;
+  readonly viewColor: ParchisColor | null;
+  readonly fontFamily: string;
+}
+
+export interface GameLayerOptions {
+  readonly tokens: readonly PresentedToken[];
+  readonly destinations: readonly PresentedDestination[];
+  readonly selectableTokenIds: readonly string[];
+  readonly onTokenTap?: (tokenId: string) => void;
 }
 
 function mulberry32(seed: number): Random {
@@ -495,6 +539,149 @@ function corridorBounds(
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+function clearLayer(layer: PIXI.Container): void {
+  for (const child of layer.removeChildren()) child.destroy({ children: true });
+}
+
+function toPixel(scene: BoardScene, point: BoardPoint): BoardPoint {
+  return {
+    x: scene.playX + point.x * scene.unit,
+    y: scene.playY + point.y * scene.unit,
+  };
+}
+
+function drawDestinations(
+  pixi: PixiModule,
+  scene: BoardScene,
+  destinations: readonly PresentedDestination[],
+): void {
+  if (destinations.length === 0) return;
+
+  const graphics = new pixi.Graphics();
+  scene.destinationLayer.addChild(graphics);
+
+  for (const destination of destinations) {
+    const anchor = toPixel(scene, destination.anchor);
+    const radius = scene.unit * 0.72;
+
+    graphics
+      .ellipse(anchor.x, anchor.y, radius, radius)
+      .fill({ color: HOME_COLOR[destination.color], alpha: 0.3 });
+    graphics
+      .ellipse(anchor.x, anchor.y, radius, radius)
+      .stroke({
+        color: PALETTE.ink,
+        width: Math.max(1, scene.unit * 0.055),
+        alpha: 0.4,
+      });
+  }
+}
+
+function drawTokens(
+  pixi: PixiModule,
+  scene: BoardScene,
+  tokens: readonly PresentedToken[],
+  textures: TokenTextures,
+  selectableTokenIds: readonly string[],
+  onTokenTap?: (tokenId: string) => void,
+): TokenDrawTarget[] {
+  const selectable = new Set(selectableTokenIds);
+  const targets: TokenDrawTarget[] = [];
+
+  for (const token of tokens) {
+    const anchor = toPixel(scene, token.anchor);
+    const radius = token.radius * scene.unit;
+    const isSelectable = selectable.has(token.id);
+
+    const container = new pixi.Container();
+    container.position.set(anchor.x, anchor.y);
+    scene.tokenLayer.addChild(container);
+    targets.push({ id: token.id, container, x: anchor.x, y: anchor.y });
+
+    const shadow = new pixi.Graphics();
+    shadow
+      .ellipse(0, radius * 0.18, radius * 0.9, radius * 0.5)
+      .fill({ color: PALETTE.shadow, alpha: 0.18 });
+    container.addChild(shadow);
+
+    if (isSelectable) {
+      const glow = new pixi.Graphics();
+      glow
+        .circle(0, 0, radius * 1.3)
+        .fill({ color: HOME_COLOR[token.color], alpha: 0.26 });
+      glow
+        .circle(0, 0, radius * 1.24)
+        .stroke({
+          color: 0xfff6df,
+          width: Math.max(1.5, scene.unit * 0.07),
+          alpha: 0.92,
+        });
+      glow
+        .circle(0, 0, radius * 1.36)
+        .stroke({
+          color: PALETTE.ink,
+          width: Math.max(1, scene.unit * 0.035),
+          alpha: 0.4,
+        });
+      container.addChild(glow);
+    }
+
+    const texture = textures[token.color];
+    if (texture) {
+      const sprite = new pixi.Sprite(texture);
+      const scale = isSelectable ? 1.08 : 1;
+
+      sprite.anchor.set(0.5);
+      sprite.width = radius * 2 * scale;
+      sprite.height = radius * 2 * scale;
+      container.addChild(sprite);
+    } else {
+      const fallback = new pixi.Graphics();
+      fallback
+        .circle(0, 0, radius)
+        .fill({ color: HOME_COLOR[token.color], alpha: 0.92 });
+      fallback
+        .circle(0, 0, radius)
+        .stroke({ color: PALETTE.ink, width: 1, alpha: 0.7 });
+      container.addChild(fallback);
+    }
+
+    if (isSelectable && onTokenTap) {
+      container.eventMode = "static";
+      container.cursor = "pointer";
+      container.hitArea = new pixi.Circle(0, 0, Math.max(radius * 1.6, scene.unit * 0.55));
+      container.on("pointertap", () => onTokenTap(token.id));
+    }
+  }
+
+  return targets;
+}
+
+/**
+ * Refreshes only the game pieces. The static board scene is reused so a roll or
+ * a token move never rebuilds the grain, ink borders, or 68 numerals.
+ */
+export function drawGameLayers(
+  pixi: PixiModule,
+  scene: BoardScene,
+  options: GameLayerOptions,
+  textures: { tokens: TokenTextures },
+): readonly TokenDrawTarget[] {
+  clearLayer(scene.destinationLayer);
+  clearLayer(scene.tokenLayer);
+
+  drawDestinations(pixi, scene, options.destinations);
+
+  return drawTokens(
+    pixi,
+    scene,
+    options.tokens,
+    textures.tokens,
+    options.selectableTokenIds,
+    options.onTokenTap,
+  );
+}
+
 /**
  * Draws the whole board. The canvas is square in normal use; if it is not, the
  * board is centred on the smaller side and the table wood fills the rest.
@@ -503,18 +690,18 @@ export function drawBoard(
   pixi: PixiModule,
   stage: PIXI.Container,
   options: DrawBoardOptions,
-): void {
+): BoardScene | null {
   const previous = stage.removeChildren();
   for (const child of previous) child.destroy({ children: true });
 
-  const { width, height, fontFamily, playerColor } = options;
+  const { width, height, fontFamily, viewColor } = options;
   if (
     !Number.isFinite(width) ||
     !Number.isFinite(height) ||
     width < 24 ||
     height < 24
   ) {
-    return;
+    return null;
   }
 
   const side = Math.min(width, height);
@@ -530,7 +717,8 @@ export function drawBoard(
 
   const unit = playSize / 21;
   const positions = getBoardPositions(playSize, playX, playY);
-  const view = getBoardView(playerColor);
+  const view = viewColor ? getBoardView(viewColor) : null;
+  const rotation = view?.rotation ?? 0;
   const playCenterX = playX + playSize / 2;
   const playCenterY = playY + playSize / 2;
 
@@ -724,7 +912,7 @@ export function drawBoard(
   const playRoot = new pixi.Container();
   playRoot.pivot.set(playCenterX, playCenterY);
   playRoot.position.set(playCenterX, playCenterY);
-  playRoot.rotation = view.rotation;
+  playRoot.rotation = rotation;
   root.addChild(playRoot);
 
   // 3. Cream wooden play surface.
@@ -1023,14 +1211,19 @@ export function drawBoard(
     },
   );
 
-  // 8. Numbers, rotated to face the player on each side of the board.
+  // 8. Numbers, rotated to face the player on each side of the board. With no
+  // view colour the artwork's own physical numbering is kept.
   const fontSize = Math.max(6, unit * 0.42);
   const labels = new pixi.Container();
   playRoot.addChild(labels);
 
   for (const square of positions.squares) {
     const label = new pixi.Text({
-      text: String(getViewSquareNumber(playerColor, square.square)),
+      text: String(
+        viewColor
+          ? getViewSquareNumber(viewColor, square.square)
+          : square.square,
+      ),
       style: {
         fontFamily,
         fontSize,
@@ -1043,8 +1236,34 @@ export function drawBoard(
     label.anchor.set(0.5);
     label.x = square.label.x;
     label.y = square.label.y;
-    label.rotation = square.label.rotation;
+    // Shared-screen numerals stay upright on the screen. The play area may be
+    // rotated for a player-relative view, so counter-rotate each label.
+    label.rotation = -rotation;
     label.alpha = 0.95;
     labels.addChild(label);
   }
+
+  // 9. Empty game layers. Pieces, destination markers, and dice are refreshed
+  // independently so moving a token never rebuilds the static board.
+  const destinationLayer = new pixi.Container();
+  playRoot.addChild(destinationLayer);
+
+  const tokenLayer = new pixi.Container();
+  playRoot.addChild(tokenLayer);
+
+  return {
+    root,
+    playRoot,
+    destinationLayer,
+    tokenLayer,
+    canvasWidth: width,
+    canvasHeight: height,
+    playX,
+    playY,
+    playSize,
+    frameWidth,
+    unit,
+    viewColor,
+    fontFamily,
+  };
 }
