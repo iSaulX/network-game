@@ -2,7 +2,7 @@
 
 > Living document. Every task must leave this file more accurate than it found it.
 
-_Last updated: 2026-10-30 (Tasks 01–03 implemented; briefs 04–07 pending)_
+_Last updated: 2026-10-31 (Tasks 01–03 implemented; `/play` rebuilt as the square 21×21 reference board with PixiJS, player-relative rotation and start-relative numbering; briefs 04–07 pending)_
 
 ## Purpose
 
@@ -20,11 +20,12 @@ Parchís Stars, a networked Parchís game built with Next.js and a hand-drawn UI
   - `drawably/style.css` is imported exactly once, in `app/layout.tsx`
   - Theme through custom properties: `--drawably-stroke`, `--drawably-fill`, `--drawably-paper`, `--drawably-width`
   - Do not restyle drawably's SVG paths or fake the look with CSS borders
-- **Game rendering:** **PixiJS** (`pixi.js`) — board, tokens, dice, animations, in-game HUD, and every game-state update
+- **Game rendering:** **PixiJS** (`pixi.js` 8.22.0) — board, tokens, dice, animations, in-game HUD, and every game-state update
   - The game is never rendered with DOM/SVG, CSS, or drawably
   - One Pixi `Application` mounted in a client component; React handles mounting plus the UI around it
   - Drawably controls cannot live inside the Pixi canvas
-  - Pending Task 06, starting with the reusable local/bot `GameStage`
+  - The `/play` reference board is implemented with PixiJS in `components/game/`; the reusable local/bot `GameStage` (tokens, dice, interactions) is still pending Task 06
+  - PixiJS is imported dynamically inside the client effect so the canvas never runs during server rendering
 - **Offline:** Serwist service worker (pending Task 05) — app-shell precache, offline fallback, versioned caches
 - **HeroUI (popover exception):** `@heroui/react` v3.2.6 `Popover.Root`/`Trigger`/`Content`/`Dialog` for the homepage avatar picker only
   - Styles come from `@heroui/styles` (utilities, variants, default theme, popover component CSS) plus `tw-animate-css`, imported in `app/globals.css`
@@ -43,6 +44,7 @@ app/
   manifest.ts     PWA web app manifest (implemented; fullscreen display + placeholder icons)
   globals.css     Tailwind import, HeroUI popover style prelude, paper theme, drawably variables, safe-area shell
   offline/        Offline fallback page (pending Task 05)
+  play/           `/play` board page: drawably chrome + square PixiJS reference board (implemented)
   bots/           Local 1-human-vs-3-bots mode (pending Task 06)
   versus/         1v1 P2P lobby + game (pending Task 07, gated)
   sw.ts           Serwist service worker source (pending Task 05)
@@ -53,7 +55,9 @@ components/
   avatar-pfp.tsx  Large drawably-circled avatar with image/emoji and label
   avatar-visual.tsx  Shared next/image avatar with emoji fallback
   drawably-trigger-button.tsx  Ref-forwarding drawably button used as the HeroUI Popover trigger
-  game/           Reusable PixiJS game stage (pending Task 06)
+  game/
+    parchis-board.tsx  Client component: mounts one square Pixi Application and redraws it on resize
+    board-drawing.ts   Framework-free Pixi drawing: walnut table, oak frame, wood grain, homes and flowers, corridors, numbered track, goal X, and free-hand borders
 public/
   fonts/          OpenRunde Regular/Medium/Semibold/Bold (woff/otf)
   icons/          PWA icons + Apple touch icon (placeholder artwork; a later icon task replaces it)
@@ -62,6 +66,8 @@ public/
   sw.js           Generated service worker (gitignored, pending Task 05)
 lib/
   parchis/        Pure classic Parchís engine + bun tests (implemented, Task 03)
+    board-geometry.ts  21×21 reference-board layout, 68-cell polygons, corridors, goal, yards, starts/entrances/safe marks, and physical/view-aware position helpers (implemented)
+    board-geometry.test.ts  `bun test` coverage for the reference geometry, adjacency, positions, and player view
   party/          Shared protocol, transport/session abstractions, client API/WS/WebRTC
   server/party/   Server-only store, HTTP services, WS/signaling layer (pending Tasks 04/07)
   bots/           Pure local bot policy (pending Task 06)
@@ -89,6 +95,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 | Route | Purpose | Data |
 | --- | --- | --- |
 | `/` | Homepage / player entry: avatar picker, join party, create party | Local avatar state only; no network or persistence (implemented) |
+| `/play` | Square PixiJS reference board with drawably page chrome (implemented) | Static board; no engine, tokens, or network yet |
 | `/offline` | Offline fallback page, precached by the service worker (pending Task 05) | Static |
 | `/bots` | Local game vs 3 bots, fully offline (pending Task 06) | Engine state in browser memory + `localStorage` |
 | `/versus/[code]` | 1v1 P2P lobby and game over WebRTC (pending Task 07, gated) | Host-authoritative engine state; signaling via WS |
@@ -116,6 +123,20 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Join/create cards:** the join card has the party-code input (real label, `maxLength={6}`, `autoComplete="off"`, `spellCheck={false}`, uppercase styling) and the solid "Unirse a la partida" button. The create card has the outlined green "Crear una partida" button pinned to its bottom. Both right-column cards share the column height. Neither action has a handler.
 - **Accessibility/copy:** all visible text, helpers, and `aria-label`s are Spanish with accents. All buttons, including the avatar trigger and popover options, include `select-none`; the name and party-code inputs stay selectable. The popover is keyboard-operable and dismissible through HeroUI/react-aria.
 - **Boundary:** no network requests, API calls, routing, localStorage, or game logic. Backend and navigation arrive in later tasks.
+
+## Play board (implemented)
+
+- **Route:** `/play`, implemented in `app/play/page.tsx` as a client component. The page keeps drawably chrome around the board: badge, highlighted title, the “Juegas como” colour selector, and a “Volver al inicio” button. The previous square-number explorer, start buttons, and legend were removed by direct request. The board is PixiJS.
+- **Board geometry:** `lib/parchis/board-geometry.ts` is pure TypeScript (no React, PixiJS, Next.js, or DOM). It models the reference artwork on a **21×21 unit play surface**: four 7×7 homes, three-lane arms, three-row side strips, a 5×5 central goal split by its diagonals, and the 68-square track. All eight inner-corner cells (8, 9, 25, 26, 42, 43, 59, 60) are chamfered by the goal X; an independent pixel audit caught that the two top pairs were initially modelled as rectangles.
+- **Track numbering:** 1–8 down the top-left lane, 9–16 leftward, 17 at the left tip, 18–25 rightward, 26–33 down the bottom-left lane, 34 at the bottom tip, 35–42 up the bottom-right lane, 43–50 rightward, 51 at the right tip, 52–59 leftward, 60–67 up the top-right lane, and 68 at the top tip. Numbers are rotated to face the player on each side (180°, 0°, 90°, −90°).
+- **Player view:** `/play` has a “Juegas como” selector. The play area rotates as one Pixi container so the chosen colour's home is always in the **bottom-left** corner (blue 0°, green −90°, yellow 180°, red +90°); the table and oak frame stay fixed. Labels are player-relative: the colour's start is **1**, numbers continue in play order, the home entrance is **64**, and 65–68 are the four squares after the entrance. `getBoardView`, `getViewSquareNumber`, `getViewSquarePosition`, and `getViewBoardPositionsForCanvas` expose the same transform to token layers. The numerals keep the artwork's per-side orientation; after rotation, the current player's numbered side is the left edge.
+- **Colour layout:** green top-left (start **5**, entrance **68**), yellow top-right (56/51), red bottom-right (39/34), blue bottom-left (22/17). Starts are painted with their corridor colour; the four `start + 7` squares (12/29/46/63) are brown safe marks; the four entrance tips are darker brown. Each colour has seven private corridor cells ordered from the entrance toward the goal; progress 64–70 maps to them and progress 71 to the colour's goal triangle.
+- **Position API:** `getBoardPositions(playSize, originX, originY)` returns physical pixel polygons and centres for every track square, corridor, yard/slot, and goal. `getBoardPositionsForCanvas(canvasSize)` applies the shared frame composition (`getBoardFrameLayout`: 6.5 % table margin and 4.5 % frame per side) for a square canvas. Player-view lookups: `getBoardView(color)`, `getViewSquareNumber(color, square)`, `getViewSquarePosition(color, square, playSize, …)`, and `getViewBoardPositionsForCanvas(canvasSize, color, …)`. Single physical lookups: `squareToPoint`, `getSquarePosition`, `progressToSquare`, `getProgressAnchor`/`getProgressPoint`, `getYardSlotAnchor`, `getYardRect`, `wrapSquare`. Invalid input throws `RangeError`.
+- **Rendering:** `components/game/parchis-board.tsx` dynamically imports PixiJS inside the client effect, mounts one square `Application`, observes the host with `ResizeObserver`, resizes, and redraws. `components/game/board-drawing.ts` draws the walnut table, oak frame and mitres, cream wood surface with procedural grain, homes with 16-petal flowers (alternating long/short petals), painted corridors and special cells, central triangles, and Open Runde numerals. No DOM/SVG or drawably element draws game pixels.
+- **Free-hand borders:** every cell/home/corridor/frame border is a seeded rough polyline. Axis-aligned edges are merged into one stroke per shared line (shared cell edges are never stroked twice), while the two goal diagonals are single X strokes continuing to the home corners. The frame and goal X use slightly heavier strokes. The board is static; it does not boil or animate.
+- **Page layout:** the board is capped at 860 CSS px and shown as a rounded, shadowed wooden card; the page scrolls vertically when the viewport is shorter. At 390 px the board is 358 px square with no horizontal overflow; the four colour buttons form a 2×2 grid. The selector is a local preview; future game state will pass the assigned colour to `ParchisBoard`. The page uses Spanish copy, a `role="img"` label that names the view colour, and `select-none` buttons.
+- **Tests:** `bun test` covers all 68 unique cells, the closed loop and shared boundaries, the eight chamfered cells, starts/entrances/safe marks, corridor order/adjacency, yards/slots, progress anchors, pixel/frame/position helpers, player-view rotation and renumbering (start 1, entrance 64), and invalid input.
+- **Follow-ups:** the artwork paints four brown `start + 7` safe squares, while the implemented engine's Classic rule uses `start + 4` and `start + 11`; reconcile this before wiring the board to the engine. The engine colour IDs also differ from the artwork's corner order and must be mapped explicitly. There are no tokens, dice, highlights, animations, networking, or persistence yet.
 
 ## PWA
 
@@ -164,10 +185,11 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
   - `engine.ts` — actions: `createGame`, `rollDie`, `roll`, `applyMove`, `pass`, `applyBonusMove`, `isFinished`, `getWinnerId`.
   - `index.ts` — the only public entry point.
   - `test-helpers.ts`, `*.test.ts` — test-only (position builder, deep-freeze, seeded `mulberry32`); not re-exported.
-  - `bun-test.d.ts` — minimal ambient types for `bun:test` so `tsc --noEmit` passes without adding `@types/bun` (delete it if `@types/bun` is ever added).
+  - `bun-test.d.ts` — minimal ambient types for `bun:test`; kept alongside `@types/bun` (added by the PixiJS board), and `tsc --noEmit` passes with both.
 - **Ruleset:** Classic Parchís mode. One die; enter only on 5 (mandatory when possible, a complete move, never captures); 6 grants an extra roll; 6 counts as 7 when no token is in the yard (goal tokens count as out); capture +20 bonus; goal +10 bonus; barriers; three consecutive 6s penalty; exact roll to the goal.
 - **Classic vs Spanish mode:** classic forbids two different colours resting on the same safety square (landing there is illegal, passing is allowed); Spanish mode is out of scope. Mixed-colour blockades cannot exist.
 - **Board constants:** 68 outer squares; starts at 0/17/34/51 (red/blue/yellow/green); route progress 0–63 on the outer track (absolute index `(start + progress) % 68`), 64–70 in the private home column, 71 at the goal; 12 safe squares `0, 4, 11, 17, 21, 28, 34, 38, 45, 51, 55, 62`. No colour's home entrance (progress 63) is a safe square.
+- **Visual counterpart:** `lib/parchis/board-geometry.ts` owns the 21×21 reference layout, chamfered inner corners, corridors, yard slots, and physical/view-aware positions. The artwork paints starts, each colour's `start + 7` brown mark, and entrance tips at 17/34/51/68 (five squares before each colour's start); these are not the engine's 12 safe squares. The engine's colour IDs (red 0, blue 17, yellow 34, green 51) must be mapped explicitly to the artwork's corner colours before connecting the board to the engine.
 - **Occupancy:** max 2 tokens per outer square, same colour only. Two tokens form a barrier that blocks passing and landing for everyone (owner included). Home column and goal are private, unlimited and capture-free.
 - **State:** JSON-safe and fully public (`schemaVersion: 1`, `mode: "classic"`), no `Map`/`Set`/`Date`/functions. The die value is supplied by the caller (`rollDie(random)` is a helper). Actions are taken implicitly by the current player; the caller authenticates the sender.
 - **Purity:** every action validates first, then returns a new state built from copies; inputs (even deep-frozen) are never touched. On error the state is unchanged.
@@ -253,6 +275,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Task 01 — Homepage (UI only):** complete. See `results/01-homepage.md`.
 - **Task 02 — PWA shell (installable, full screen, placeholder icon):** complete. See `results/02-pwa.md`.
 - **Task 03 — Parchís game engine (Classic mode):** complete. See `results/03-game-logic.md`.
+- **Play board (`/play`, direct request, no task brief):** complete — square 21×21 reference board with free-hand PixiJS borders, home flowers, corridors, goal, position APIs, and a player-relative view (home always bottom-left, start always 1). See `results/play-board.md`.
 - **Task 04 — Realtime parties (API routes + WebSockets):** pending.
 - **Task 05 — Offline app shell (service worker + cache):** pending.
 - **Task 06 — Offline bot mode (1 human + 3 bots, PixiJS board):** pending.
