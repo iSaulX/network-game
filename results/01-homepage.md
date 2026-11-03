@@ -71,3 +71,13 @@ No changes were made to `AGENTS.md` during this task.
 - Create uses the `outline` variant with a green accent rather than `scribble`, because the scribble hatching made the label unreadable; the brief allows either.
 - The random identity is client-only and not persisted; refreshing generates a new name/avatar, and the name remains editable. Wiring identity into party creation/joining is a later task.
 - The page is pinned to the light paper theme; dark mode remains a later task.
+
+## Follow-up: homepage copy trim (2026-11-02)
+
+- Removed the "Parchís Stars" badge that sat above the logo.
+- Removed the subtitle "Elige tu avatar, consigue un código y llama a tus amigos a la mesa."
+- Removed the footer line "Hecho a mano. Jugado entre amigos."
+- Dropped the now-unused `DrawablyBadge` import from `app/page.tsx`.
+- No layout or behaviour changes beyond the removed elements; the accent dots,
+  logo, highlighted title, profile card and mode cards are unchanged.
+- Verified with `npx tsc --noEmit` and `npx eslint app/page.tsx` (both pass).

@@ -3,7 +3,6 @@
 import Image from "next/image";
 import { useState, useSyncExternalStore } from "react";
 import {
-  DrawablyBadge,
   DrawablyButton,
   DrawablyCard,
   DrawablyHighlight,
@@ -144,13 +143,6 @@ export default function Home() {
     <main className="flex min-h-dvh flex-col items-center justify-center px-4 py-6 sm:px-6 lg:h-dvh lg:min-h-0 lg:overflow-hidden lg:py-0">
       <div className="w-full max-w-4xl">
         <header className="mb-4 flex flex-col items-center gap-2.5 text-center sm:mb-6">
-          <DrawablyBadge
-            stroke="var(--parchis-red)"
-            className="px-2.5 py-1"
-          >
-            Parchís Stars
-          </DrawablyBadge>
-
           <div className="flex items-center gap-2" aria-hidden="true">
             {ACCENT_DOTS.map((color) => (
               <span
@@ -176,10 +168,6 @@ export default function Home() {
               </DrawablyHighlight>
             </h1>
           </div>
-
-          <p className="max-w-2xl text-pretty text-sm leading-6 text-stone-600 sm:text-base">
-            Elige tu avatar, consigue un código y llama a tus amigos a la mesa.
-          </p>
         </header>
 
         <div className="grid gap-4 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
@@ -325,10 +313,6 @@ export default function Home() {
             </DrawablyButton>
           </form>
         </DrawablyCard>
-
-        <p className="mt-4 text-center text-xs tracking-wide text-stone-500">
-          Hecho a mano. Jugado entre amigos.
-        </p>
       </div>
     </main>
   );
