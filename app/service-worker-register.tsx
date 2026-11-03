@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { isTauriRuntime } from "@/lib/tauri";
 
 /**
  * Registers the generated service worker in production only.
@@ -11,6 +12,22 @@ import { useEffect } from "react";
  */
 export function ServiceWorkerRegister() {
   useEffect(() => {
+    if (isTauriRuntime()) {
+      // Defensively drop any worker registered by an older desktop build.
+      navigator.serviceWorker
+        ?.getRegistrations()
+        .then((registrations) =>
+          Promise.all(
+            registrations.map((registration) => registration.unregister()),
+          ),
+        )
+        .catch(() => {
+          // The desktop bundle needs no worker; cleanup is best-effort.
+        });
+
+      return;
+    }
+
     if (!("serviceWorker" in navigator)) {
       return;
     }

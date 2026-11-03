@@ -1,0 +1,131 @@
+name: Desktop builds
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            artifact: linux-x86_64
+            bundles: deb,rpm,appimage
+            rust-targets: ""
+            tauri-args: ""
+          - platform: windows-2025
+            artifact: windows-x86_64
+            # NSIS is the reliable Windows installer on hosted runners; MSI
+            # needs the optional VBSCRIPT feature and can fail the whole job.
+            bundles: nsis
+            rust-targets: ""
+            tauri-args: ""
+          - platform: macos-15
+            artifact: macos-universal
+            bundles: app,dmg
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri-args: --target universal-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Install Rust (native target)
+        if: matrix.rust-targets == ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust (macOS universal)
+        if: matrix.rust-targets != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: tauri/src-tauri -> target
+          key: ${{ matrix.artifact }}
+          cache-on-failure: true
+
+      # `tauri build` runs the `beforeBuildCommand` from tauri.conf.json, which
+      # produces the static export in out/ before the Rust crate is compiled.
+      - name: Build the desktop bundle
+        run: node scripts/tauri.mjs build --bundles ${{ matrix.bundles }} ${{ matrix.tauri-args }}
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+
+      # actions/upload-artifact does not preserve file modes, so portable
+      # bundles are archived here to keep their executable bit.
+      - name: Archive the AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for appimage in tauri/src-tauri/target/release/bundle/appimage/*.AppImage; do
+            [ -f "$appimage" ] || continue
+            tar -czf "$appimage.tar.gz" -C "$(dirname "$appimage")" "$(basename "$appimage")"
+          done
+
+      - name: Archive the macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for app in tauri/src-tauri/target/*/release/bundle/macos/*.app \
+                     tauri/src-tauri/target/release/bundle/macos/*.app; do
+            [ -d "$app" ] || continue
+            ditto -c -k --sequesterRsrc --keepParent "$app" "$app.zip"
+          done
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: parchis-stars-${{ matrix.artifact }}
+          path: |
+            tauri/src-tauri/target/release/bundle/**/*
+            tauri/src-tauri/target/*/release/bundle/**/*
+          if-no-files-found: error
+          retention-days: 14

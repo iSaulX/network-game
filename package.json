@@ -6,6 +6,9 @@
     "dev": "next dev",
     "build": "next build && node scripts/generate-service-worker.mjs",
     "build:sw": "node scripts/generate-service-worker.mjs",
+    "build:desktop": "node scripts/build-desktop.mjs",
+    "desktop:dev": "node scripts/tauri.mjs dev",
+    "desktop:build": "node scripts/tauri.mjs build",
     "start": "next start",
     "lint": "eslint"
   },
@@ -22,6 +25,7 @@
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
+    "@tauri-apps/cli": "^2",
     "@types/bun": "^1.4.4",
     "@types/node": "^20",
     "@types/react": "^19",

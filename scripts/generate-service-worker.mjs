@@ -53,9 +53,31 @@ const requiredRoutes = [
   ["offline.html", "/offline"],
 ];
 
-for (const [file] of requiredRoutes) {
+// The worker precaches URLs, not files, so the prerender manifest is the
+// source of truth. Build adapters (for example Vercel's) may relocate or
+// consume `.next/server/app/*.html` before this script runs, so a missing
+// HTML file is only a problem when the route is not prerendered either.
+const prerenderManifestPath = path.join(nextDirectory, "prerender-manifest.json");
+const prerenderedRoutes = new Set();
+
+if (existsSync(prerenderManifestPath)) {
+  try {
+    const manifest = JSON.parse(readFileSync(prerenderManifestPath, "utf8"));
+    for (const route of Object.keys(manifest.routes ?? {})) {
+      prerenderedRoutes.add(route);
+    }
+  } catch (error) {
+    fail(`Could not read .next/prerender-manifest.json: ${error.message}`);
+  }
+}
+
+for (const [file, route] of requiredRoutes) {
+  if (prerenderedRoutes.has(route)) {
+    continue;
+  }
+
   if (!existsSync(path.join(nextDirectory, "server", "app", file))) {
-    fail(`Missing prerendered route .next/server/app/${file}.`);
+    fail(`Route ${route} is neither in the prerender manifest nor at .next/server/app/${file}.`);
   }
 }
 
@@ -69,12 +91,16 @@ function add(url, filePath) {
 
   urls.add(url);
 
-  if (filePath) {
+  if (filePath && existsSync(filePath)) {
     sizes.set(url, statSync(filePath).size);
   }
 }
 
 function walk(directory, urlPrefix, skip) {
+  if (!existsSync(directory)) {
+    return;
+  }
+
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (entry.name.startsWith(".")) {
       continue;
@@ -106,10 +132,6 @@ for (const [file, url] of requiredRoutes) {
   );
 }
 
-add(
-  "/manifest.webmanifest",
-  path.join(nextDirectory, "server", "app", "manifest.webmanifest.body"),
-);
 add(
   "/favicon.ico",
   path.join(nextDirectory, "server", "app", "favicon.ico.body"),

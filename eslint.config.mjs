@@ -16,6 +16,9 @@ const eslintConfig = defineConfig([
     ".agents/**",
     // Generated from scripts/service-worker-template.js after `next build`.
     "public/sw.js",
+    // Rust build output and Tauri-generated schemas.
+    "tauri/src-tauri/target/**",
+    "tauri/src-tauri/gen/**",
   ]),
 ]);
 

@@ -1,42 +1,28 @@
 import type { NextConfig } from "next";
 
+// `TAURI_BUILD=1` (set by scripts/build-desktop.mjs) produces the fully static
+// export that Tauri embeds in the desktop binary. The web build keeps the
+// server-capable Cache Components and PWA configuration.
+const isDesktopBuild = process.env.TAURI_BUILD === "1";
+
 const nextConfig: NextConfig = {
-  /* config options here */
   experimental: {
     agentFeedback: true,
   },
-  cacheComponents: true,
-  partialPrefetching: true,
-  async headers() {
-    return [
-      {
-        source: "/sw.js",
-        headers: [
-          {
-            key: "Content-Type",
-            value: "application/javascript; charset=utf-8",
-          },
-          {
-            key: "Cache-Control",
-            value: "no-cache, no-store, must-revalidate",
-          },
-          {
-            key: "Service-Worker-Allowed",
-            value: "/",
-          },
-        ],
-      },
-      {
-        source: "/manifest.webmanifest",
-        headers: [
-          {
-            key: "Cache-Control",
-            value: "no-store",
-          },
-        ],
-      },
-    ];
-  },
+  ...(isDesktopBuild
+    ? {
+        output: "export" as const,
+        // The export has no Next.js image optimizer or server, so images are
+        // served directly from the bundled public/ files.
+        images: { unoptimized: true },
+        // Emit route/index.html so Tauri's asset resolver can serve
+        // /alone/, /play/ and /offline/ without a server rewrite.
+        trailingSlash: true,
+      }
+    : {
+        cacheComponents: true,
+        partialPrefetching: true,
+      }),
   turbopack: {
     root: __dirname,
     rules: {
@@ -47,5 +33,38 @@ const nextConfig: NextConfig = {
     },
   },
 };
+
+if (!isDesktopBuild) {
+  // Custom response headers require a Node.js server and are unsupported in a
+  // static export, so they are only configured for the web build.
+  nextConfig.headers = async () => [
+    {
+      source: "/sw.js",
+      headers: [
+        {
+          key: "Content-Type",
+          value: "application/javascript; charset=utf-8",
+        },
+        {
+          key: "Cache-Control",
+          value: "no-cache, no-store, must-revalidate",
+        },
+        {
+          key: "Service-Worker-Allowed",
+          value: "/",
+        },
+      ],
+    },
+    {
+      source: "/manifest.webmanifest",
+      headers: [
+        {
+          key: "Cache-Control",
+          value: "no-store",
+        },
+      ],
+    },
+  ];
+}
 
 export default nextConfig;

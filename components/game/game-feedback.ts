@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWebHaptics } from "web-haptics/react";
+import { needsBlobAudio } from "@/lib/tauri";
 import {
   getFeedbackCue,
   type FeedbackActor,
@@ -16,6 +17,19 @@ import {
 } from "./game-sound-settings";
 
 type SampleName = "dice-roll" | "click";
+
+const SAMPLE_NAMES = ["dice-roll", "click"] as const;
+
+function createAudioElement(src: string): HTMLAudioElement | null {
+  try {
+    const audio = new Audio(src);
+    audio.preload = "auto";
+    audio.load();
+    return audio;
+  } catch {
+    return null;
+  }
+}
 
 /** The two supplied MP3s replace the synthesized dice/movement cues. */
 const SAMPLE_SOUNDS: Partial<
@@ -44,18 +58,36 @@ class GameSoundEngine {
   preload(): void {
     if (typeof window === "undefined" || this.samples) return;
 
-    try {
-      const samples = new Map<SampleName, HTMLAudioElement>();
-      for (const name of ["dice-roll", "click"] as const) {
-        const audio = new Audio(`/sounds/${name}.mp3`);
-        audio.preload = "auto";
-        audio.load();
-        samples.set(name, audio);
+    const samples = new Map<SampleName, HTMLAudioElement>();
+    this.samples = samples;
+
+    if (needsBlobAudio()) {
+      // WebKitGTK cannot play media from tauri://; fetch each clip into a
+      // blob URL instead. The map fills in as the local fetches finish.
+      for (const name of SAMPLE_NAMES) {
+        void this.loadBlobSample(name).then((audio) => {
+          if (audio) samples.set(name, audio);
+        });
       }
-      this.samples = samples;
+      return;
+    }
+
+    for (const name of SAMPLE_NAMES) {
+      const audio = createAudioElement(`/sounds/${name}.mp3`);
+      if (audio) samples.set(name, audio);
+    }
+  }
+
+  private async loadBlobSample(
+    name: SampleName,
+  ): Promise<HTMLAudioElement | null> {
+    try {
+      const response = await fetch(`/sounds/${name}.mp3`);
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      return createAudioElement(URL.createObjectURL(blob));
     } catch {
-      // The synthesized palette still works if the clips cannot be created.
-      this.samples = null;
+      return null;
     }
   }
 

@@ -2,7 +2,7 @@
 
 > Living document. Every task must leave this file more accurate than it found it.
 
-_Last updated: 2026-11-01 (Tasks 01–03 and 05 implemented; `/alone` selects a local 1v1 or four-player all-vs-all game with the human’s colour, name and avatar, and `/play` runs it against the pure heuristic bots with 1 s pacing, human-relative numbering, compact textless dice trays, mobile seats around the board, Pixi chip interpolation, optional haptic feedback plus two supplied dice/move MP3s and synthesized cues, a per-category sound settings popover, and an auto-play checkbox above the human dice that hands the human seat to the bot until unchecked; Task 05 adds a generated versioned service worker that precaches the shell, every route, all `_next/static` chunks/fonts and every public asset for fully offline local play, with `/alone` as the installed PWA start URL and an offline page/indicator; the finished game now shows a full-screen 10 px-blurred win/loss result dialog with the supplied trophy/crying artwork, dynamic Spanish copy and replay/home actions, and the four in-game header actions now use the supplied button icons. The full Task 06 `/bots`/persistence brief remains pending, as do briefs 04 and 07.)_
+_Last updated: 2026-11-02 (Tasks 01–03 and 05 implemented; `/alone` selects a local 1v1 or four-player all-vs-all game with the human’s colour, name and avatar, and `/play` runs it against the pure heuristic bots with 1 s pacing, human-relative numbering, compact textless dice trays, mobile seats around the board, Pixi chip interpolation, optional haptic feedback plus two supplied dice/move MP3s and synthesized cues, a per-category sound settings popover, and an auto-play checkbox above the human dice that hands the human seat to the bot until unchecked; Task 05 adds a generated versioned service worker that precaches the shell, every route, all `_next/static` chunks/fonts and every public asset for fully offline local play, with `/alone` as the installed PWA start URL and an offline page/indicator; the finished game now shows a full-screen 10 px-blurred win/loss result dialog with the supplied trophy/crying artwork, dynamic Spanish copy and replay/home actions, and the four in-game header actions now use the supplied button icons. A Tauri v2 desktop shell now embeds a fully static export (`out/`) so every route and asset works offline, with a GitHub Actions matrix that builds Linux, Windows and macOS universal bundles. The full Task 06 `/bots`/persistence brief remains pending, as do briefs 04 and 07.)_
 
 ## Purpose
 
@@ -33,6 +33,7 @@ Parchís Stars, a networked Parchís game built with Next.js and a hand-drawn UI
   - **Requested exception:** at the project owner's request the two-dice controls are DOM drawably cards placed above/below each player card, not Pixi sprites. They are the only game controls outside the canvas; all board/token rendering remains Pixi.
   - PixiJS is imported dynamically inside the client effect so the canvas never runs during server rendering
 - **Offline:** generated, prefixed service worker (`scripts/service-worker-template.js` → `public/sw.js`) — versioned precache of the shell, every route, all `/_next/static` files and every public asset; network-first navigations with `/offline` fallback; production-only registration. See “Offline shell” below.
+- **Desktop:** Tauri v2.12 (`tauri/src-tauri`) wrapping a fully static Next.js export (`TAURI_BUILD=1` → `out/`). Every route, script, stylesheet, font, image and sound is embedded in the native binary, so the desktop app works with no network and without a service worker. See “Desktop (Tauri)” below.
 - **HeroUI (popover exception):** `@heroui/react` v3.2.6 `Popover.Root`/`Trigger`/`Content`/`Dialog` for the homepage avatar picker only
   - Styles come from `@heroui/styles` (utilities, variants, default theme, popover component CSS) plus `tw-animate-css`, imported in `app/globals.css`
   - The app's paper theme overrides the HeroUI overlay tokens (`--overlay`, `--overlay-shadow`)
@@ -47,7 +48,6 @@ Parchís Stars, a networked Parchís game built with Next.js and a hand-drawn UI
 app/
   layout.tsx      Root layout: OpenRunde local font, drawably stylesheet import, globals, Spanish metadata + viewport
   page.tsx        Homepage (implemented; profile/join/create cards, solo-bots entry + avatar popover)
-  manifest.ts     PWA web app manifest (implemented; fullscreen display, `/alone` start URL, placeholder icons)
   globals.css     Tailwind import, HeroUI popover style prelude, paper theme, drawably variables, safe-area shell
   offline/        Static offline fallback page (`/offline`, implemented and precached)
   service-worker-register.tsx  Production-only `/sw.js` registration; dev unregisters leftovers (implemented)
@@ -89,8 +89,10 @@ public/
   game-results/   Owner-supplied full-screen result art: `win.png` (trophy) and `loser.png` (crying face)
   button-icons/   Owner-supplied transparent hand-drawn icons: `new-game.png`, `house.png`, `change-mode.png`, `sound.png`; all four are used in the in-game header, and the result overlay reuses new-game/house
   icon.png        Game icon used beside the Parchís Stars title
+  manifest.webmanifest  Static PWA manifest (works in both the server build and the desktop static export)
   sw.js           Generated service worker (gitignored; source in scripts/, revision from .next/BUILD_ID)
 lib/
+  tauri.ts        Shared Tauri runtime detection + Linux WebKitGTK blob-audio predicate
   parchis/        Pure Classic Parchís engine, two-dice variant + bun tests (implemented)
     board-geometry.ts  21×21 reference-board layout, 68-cell polygons, corridors, goal, yards, starts/entrances/safe marks, and physical/view-aware position helpers (implemented)
     board-geometry.test.ts  `bun test` coverage for the reference geometry, adjacency, positions, and player view
@@ -104,6 +106,14 @@ scripts/
   party-smoke.ts  End-to-end create/join/start/roll smoke test (pending Task 04)
   service-worker-template.js  Hand-written service worker source (precache, navigation, image, range, API boundary)
   generate-service-worker.mjs  Post-build generator: scans .next/static + public + routes, injects build ID and precache manifest into public/sw.js
+  build-desktop.mjs  Runs `next build` with TAURI_BUILD=1, verifies out/index.html, removes the unused service worker from out/
+  tauri.mjs       Cross-platform wrapper that runs the Tauri CLI from tauri/
+tauri/
+  README.md       Desktop build instructions, prerequisites and offline behaviour
+  src-tauri/      Tauri v2 Rust shell (Cargo.toml, build.rs, main.rs/lib.rs, tauri.conf.json, capabilities, icons)
+  .gitignore      Ignores src-tauri/target and src-tauri/gen
+.github/
+  workflows/desktop.yml  Matrix CI: Linux, Windows and macOS universal bundles uploaded as artifacts
 results/
   NN-<name>.md    Per-task completion summaries, named after the task brief (see AGENTS.md)
 server.ts         Custom Node server: Next + /api/ws upgrade (pending Task 04)
@@ -129,7 +139,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 | `/offline` | Static offline fallback page, precached and used for uncached navigations (implemented) | Static |
 | `/bots` | Local game vs 3 bots, fully offline (pending Task 06) | Engine state in browser memory + `localStorage` |
 | `/versus/[code]` | 1v1 P2P lobby and game over WebRTC (pending Task 07, gated) | Host-authoritative engine state; signaling via WS |
-| `/manifest.webmanifest` | PWA manifest generated from `app/manifest.ts` | Static |
+| `/manifest.webmanifest` | Static PWA manifest in `public/manifest.webmanifest` | Static |
 | `POST /api/parties` | Create a party (route handler, pending Task 04) | In-memory `PartyStore` |
 | `GET /api/parties/[code]` | Public lobby info (route handler, pending Task 04) | In-memory `PartyStore` |
 | `POST /api/parties/[code]/join` | Join a lobby (route handler, pending Task 04) | In-memory `PartyStore` |
@@ -196,7 +206,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 
 ## PWA
 
-- **Manifest route:** `app/manifest.ts` (Next.js metadata route) serves `/manifest.webmanifest`.
+- **Manifest:** `public/manifest.webmanifest` is a static file linked from the root metadata (`manifest: "/manifest.webmanifest"`). It is a plain public asset rather than an `app/manifest.ts` metadata route because metadata routes are route handlers, and route handlers need `dynamic = "force-static"` in a static export — a config that is incompatible with `cacheComponents` in the web build.
   - `name` / `short_name`: "Parchís Stars"; `description` in Spanish; `lang: "es"`, `dir: "ltr"`, `categories: ["games"]`.
   - `id` and `scope` are `/`; `start_url` is `/alone`, so an installed app opens the local solo setup directly.
   - `display: "fullscreen"` with `display_override: ["fullscreen", "standalone", "minimal-ui", "browser"]`.
@@ -223,6 +233,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 
 - **Integration choice:** the service worker is hand-written and generated, not Serwist. `@serwist/turbopack` 9.5.13 is the current stable Turbopack integration, but its route-handler implementation explicitly targets projects **without** `cacheComponents`, which this app enables (`next.config.ts`), and the Serwist 10 line is still a preview. The brief permits a hand-written worker plus a generated precache manifest as a fallback; the fallback was chosen to avoid a build-time incompatibility. `@serwist/next`'s webpack plugin cannot be used with the Turbopack build.
 - **Source and output:** `scripts/service-worker-template.js` is the source; `scripts/generate-service-worker.mjs` replaces `__BUILD_REVISION__` and `__PRECACHE_MANIFEST__` and writes `public/sw.js` after `next build`. `public/sw.js`, `public/sw.js.map` and `public/swe-worker*` are generated and git-ignored. The worker is served at `/sw.js`.
+- **Build-adapter compatibility:** the generator reads `.next/prerender-manifest.json` to confirm the four offline routes are prerendered, instead of requiring `.next/server/app/*.html` to exist on disk. Build adapters that run `onBuildComplete` (for example Vercel's, which packages and relocates those HTML files into `.vercel/output` before `next build` exits) would otherwise make the post-build step fail with `Missing prerendered route`. The worker precaches URLs, not files, so the HTML files are only measured for the logged size and are skipped when absent.
 - **Precache:** all app routes needed offline (`/`, `/alone`, `/play`, `/offline`), `/manifest.webmanifest`, `/favicon.ico`, every `/_next/static/**` file (JS chunks, CSS, hashed `next/font` media), and every file under `public/` (icons, avatars, chip/token art, dice faces/source art, mode images, supplied sounds, result artwork, button icons, font originals and starter SVGs). The generated worker itself is excluded. The current build produces 101 entries, about 60.7 MiB. The build ID from `.next/BUILD_ID` is the cache revision and is embedded in the worker.
 - **Navigation:** network-first with a 3 s timeout and `navigationPreload` where supported. On a network failure/timeout, the matching precached route is used (`/`, `/alone`, `/play`, `/offline`, query strings ignored); any other path falls back to `/offline`. A network 4xx is returned as-is; a 5xx falls back to cache.
 - **Static assets:** cache-first from the versioned precache, with a runtime cache for uncached same-origin static files. Audio range requests are answered with a `206 Partial Content` slice from the cached body. `next/image` optimizer responses are cached after first use; when offline (or when the optimizer fails), the worker serves the original precached public image for the `url` query parameter, so changing avatars and rolling dice still work on a cold offline load.
@@ -236,6 +247,17 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Build/start:** `bun run build` runs `next build && node scripts/generate-service-worker.mjs`; `bun run build:sw` regenerates the worker from the current `.next` build; `next start` serves the result. There is no Task 04 custom server (`server.ts`) in this repository, so production testing used `next build && next start`; the existing `next dev` server is unaffected and registers no worker.
 - **Offline gameplay (extends the Task 05 brief):** all local `/alone` → `/play` assets are precached, so 1v1 and all-vs-all bot games load and play on a cold offline reload, including PixiJS board textures, avatar/mode/dice images, sounds and range requests. Online parties remain network-only.
 
+## Desktop (Tauri v2)
+
+- **Why a static export:** Tauri has no Node.js server. `scripts/build-desktop.mjs` runs `next build` with `TAURI_BUILD=1`, and `next.config.ts` then sets `output: "export"`, `images: { unoptimized: true }` and `trailingSlash: true`; the result is written to `out/`. The normal `bun run build` is untouched and still enables `cacheComponents`, `partialPrefetching` and the PWA headers.
+- **Embedded assets:** `tauri/src-tauri/tauri.conf.json` sets `build.frontendDist` to `../../out`. `tauri::generate_context!()` (tauri-codegen) embeds every file in that directory (HTML, RSC payloads, `_next/static` chunks, fonts, images, sounds, manifest) into the Rust binary at compile time. The webview loads them from the Tauri custom protocol, so the desktop app is fully offline with no cache layer and no runtime downloads.
+- **Manifest:** `public/manifest.webmanifest` is a static file so it survives the static export without a route handler; `app/layout.tsx` links it with `manifest: "/manifest.webmanifest"`.
+- **Service worker:** `app/service-worker-register.tsx` uses the shared `isTauriRuntime()` helper (`__TAURI_INTERNALS__`, `window.isTauri`, `tauri:` protocol or `tauri.localhost`) and unregisters any leftover worker instead of registering one. `scripts/build-desktop.mjs` also removes `sw.js`/`swe-worker*` from `out/` so the desktop bundle does not ship a dead worker.
+- **Audio:** `components/game/game-feedback.ts` keeps the direct `/sounds/*.mp3` path on the web, macOS and Windows. On Tauri + Linux it fetches each clip and plays a blob URL because WebKitGTK/GStreamer has no URI handler for `tauri://` media; without this the supplied dice and movement clips are silent in Linux release builds.
+- **Project layout:** `tauri/src-tauri/` contains `Cargo.toml`, `build.rs`, `src/main.rs`, `src/lib.rs`, `tauri.conf.json`, `capabilities/default.json` and generated desktop icons. `scripts/tauri.mjs` runs the CLI from that directory while the CLI itself stays a root dev dependency (`@tauri-apps/cli`), keeping one `bun.lock`.
+- **Hooks:** `tauri.conf.json` sets `beforeBuildCommand` to `node scripts/build-desktop.mjs` (cwd `../..`), so a plain `tauri build` always refreshes `out/` before `generate_context!` embeds it. `beforeDevCommand` runs `bun run dev` the same way, so `desktop:dev` starts Next.js itself.
+- **Commands:** `bun run desktop:build` runs `tauri build` (the hook builds the export first); `bun run desktop:dev` starts Next.js and opens the Tauri window against `http://localhost:3000`; `bun run build:desktop` only produces `out/`. On a Mac where Finder automation is blocked, DMG bundling needs `CI=true`, which makes Tauri pass `--skip-jenkins` to `bundle_dmg.sh`.
+- **CI:** `.github/workflows/desktop.yml` builds on `ubuntu-22.04` (`deb,rpm,appimage`), `windows-2025` (`nsis`) and `macos-15` (`app,dmg`, universal `aarch64-apple-darwin` + `x86_64-apple-darwin`). It installs Bun 1.4.2, the platform webkit dependencies, Rust stable and `swatinem/rust-cache`, then uploads `tauri/src-tauri/target/**/release/bundle/**/*` as a per-platform artifact. NSIS is used instead of MSI because MSI generation depends on the optional VBSCRIPT Windows feature. Because `actions/upload-artifact` drops file modes, the workflow also uploads `.AppImage.tar.gz` and `.app.zip` archives that preserve the executable bit. Bundles are unsigned; signing/notarization is a follow-up.
 
 ## Game engine (implemented; Classic two-dice variant)
 

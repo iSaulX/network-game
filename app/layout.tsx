@@ -42,6 +42,7 @@ export const metadata: Metadata = {
     title: "Parchís Stars",
     statusBarStyle: "black-translucent",
   },
+  manifest: "/manifest.webmanifest",
   icons: {
     apple: "/icons/apple-touch-icon.png",
   },
