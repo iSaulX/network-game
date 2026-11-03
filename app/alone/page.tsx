@@ -9,6 +9,7 @@ import {
   DrawablyHighlight,
   DrawablyInput,
 } from "drawably/react";
+import { AvatarPicker } from "@/components/avatar-picker";
 import { AvatarVisual } from "@/components/avatar-visual";
 import { useGameFeedback } from "@/components/game/game-feedback";
 import {
@@ -159,40 +160,21 @@ export default function AlonePage() {
               </div>
             </fieldset>
 
-            <fieldset className="mt-5">
-              <legend className="mb-2 text-sm font-medium text-stone-700">
+            <div className="mt-5">
+              <p className="mb-2 text-sm font-medium text-stone-700">
                 Tu foto de perfil
-              </legend>
-              <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
-                {AVATARS.map((option, index) => {
-                  const selected = index === avatarIndex;
-
-                  return (
-                    <DrawablyButton
-                      key={option.image}
-                      type="button"
-                      variant="outline"
-                      stroke={selected ? accent : undefined}
-                      aria-pressed={selected}
-                      aria-label={`Elegir avatar ${option.label}`}
-                      onClick={() => {
-                        if (index === avatarIndex) return;
-                        feedback.select();
-                        setAvatarIndex(index);
-                      }}
-                      className={`flex h-14 w-full select-none items-center justify-center p-1 ${selected ? "font-semibold" : ""}`}
-                    >
-                      <AvatarVisual image={option.image} size="sm" />
-                    </DrawablyButton>
-                  );
-                })}
-              </div>
-            </fieldset>
-
-            <p className="mt-4 text-xs leading-5 text-stone-500">
-              Orden de turnos: azul → rojo → amarillo → verde. En 1 vs 1 juegas
-              contra el color de la esquina opuesta.
-            </p>
+              </p>
+              <AvatarPicker
+                options={AVATARS}
+                selectedIndex={avatarIndex}
+                onSelect={(index) => {
+                  if (index === avatarIndex) return;
+                  feedback.select();
+                  setAvatarIndex(index);
+                }}
+                accent={accent}
+              />
+            </div>
           </DrawablyCard>
 
           <DrawablyCard className="select-none p-4 sm:p-5">
@@ -267,12 +249,6 @@ export default function AlonePage() {
                 </span>
               </DrawablyButton>
             </form>
-
-            <p className="mt-4 text-xs leading-5 text-stone-500">
-              Los bots usan la misma política de juego: capturan cuando pueden,
-              forman barreras y buscan la meta. Su turno tarda un segundo entre
-              acciones.
-            </p>
           </DrawablyCard>
         </div>
       </div>

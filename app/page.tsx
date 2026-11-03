@@ -1,8 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Popover } from "@heroui/react";
+import { useState, useSyncExternalStore } from "react";
 import {
   DrawablyBadge,
   DrawablyButton,
@@ -11,8 +10,7 @@ import {
   DrawablyInput,
 } from "drawably/react";
 import { AvatarPfp } from "@/components/avatar-pfp";
-import { AvatarVisual } from "@/components/avatar-visual";
-import { DrawablyTriggerButton } from "@/components/drawably-trigger-button";
+import { AvatarPicker } from "@/components/avatar-picker";
 
 type Avatar = {
   label: string;
@@ -125,9 +123,7 @@ function getServerAvatarIndex(): number {
 
 export default function Home() {
   const [selectedAvatar, setSelectedAvatar] = useState<number | null>(null);
-  const [avatarOpen, setAvatarOpen] = useState(false);
   const [editedName, setEditedName] = useState<string | null>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
 
   const generatedName = useSyncExternalStore(
     subscribeToNothing,
@@ -143,30 +139,6 @@ export default function Home() {
   const playerName = editedName ?? generatedName;
   const avatarIndex = selectedAvatar ?? defaultAvatarIndex;
   const avatar = AVATARS[avatarIndex];
-
-  useEffect(() => {
-    if (!avatarOpen) return;
-
-    const restoreFocusOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-
-      requestAnimationFrame(() => {
-        triggerRef.current?.focus({ preventScroll: true });
-      });
-    };
-
-    document.addEventListener("keydown", restoreFocusOnEscape);
-    return () => document.removeEventListener("keydown", restoreFocusOnEscape);
-  }, [avatarOpen]);
-
-  function chooseAvatar(index: number) {
-    setSelectedAvatar(index);
-    setAvatarOpen(false);
-
-    requestAnimationFrame(() => {
-      triggerRef.current?.focus({ preventScroll: true });
-    });
-  }
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center px-4 py-6 sm:px-6 lg:h-dvh lg:min-h-0 lg:overflow-hidden lg:py-0">
@@ -251,62 +223,12 @@ export default function Home() {
             </div>
 
             <div className="pt-4">
-              <Popover.Root isOpen={avatarOpen} onOpenChange={setAvatarOpen}>
-                <Popover.Trigger<"button">
-                  render={({ ref, className: heroClassName, ...props }) => (
-                    <DrawablyTriggerButton
-                      {...props}
-                      ref={ref}
-                      onNode={(node) => {
-                        triggerRef.current = node;
-                      }}
-                      aria-haspopup="dialog"
-                      aria-label={`Cambiar avatar. Avatar actual: ${avatar.label}`}
-                      className={`${heroClassName ?? ""} flex w-full select-none items-center justify-center gap-2 px-4 py-2.5`}
-                    >
-                      <span>Cambiar avatar</span>
-                    </DrawablyTriggerButton>
-                  )}
-                />
-
-                <Popover.Content
-                  placement="bottom"
-                  offset={8}
-                  className="w-72 max-w-[calc(100vw-3rem)] rounded-2xl bg-[var(--drawably-paper)] text-[var(--foreground)]"
-                >
-                  <Popover.Arrow />
-
-                  <Popover.Dialog>
-                    <Popover.Heading className="mb-2 px-1 text-sm font-semibold text-stone-600">
-                      Elige tu avatar
-                    </Popover.Heading>
-
-                    <div className="grid grid-cols-4 gap-2">
-                      {AVATARS.map((option, index) => {
-                        const isSelected = index === avatarIndex;
-
-                        return (
-                          <DrawablyButton
-                            key={option.label}
-                            type="button"
-                            variant={isSelected ? "solid" : "outline"}
-                            fill={isSelected ? option.accent : undefined}
-                            aria-label={`Elegir avatar ${option.label}`}
-                            aria-pressed={isSelected}
-                            onClick={() => chooseAvatar(index)}
-                            className="flex h-14 w-full select-none items-center justify-center p-1 text-2xl"
-                          >
-                            <AvatarVisual
-                              image={option.image}
-                              size="sm"
-                            />
-                          </DrawablyButton>
-                        );
-                      })}
-                    </div>
-                  </Popover.Dialog>
-                </Popover.Content>
-              </Popover.Root>
+              <AvatarPicker
+                options={AVATARS}
+                selectedIndex={avatarIndex}
+                onSelect={setSelectedAvatar}
+                accent="var(--parchis-blue)"
+              />
             </div>
           </DrawablyCard>
 
@@ -382,6 +304,27 @@ export default function Home() {
             </DrawablyCard>
           </div>
         </div>
+
+        <DrawablyCard className="mt-4 flex flex-col items-center justify-between gap-3 rounded-xl bg-[var(--drawably-paper)] p-4 text-center sm:flex-row sm:p-5 sm:text-left">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight">
+              Jugar solo con bots
+            </h2>
+            <p className="mt-1 text-sm leading-6 text-stone-600">
+              Sin esperas ni códigos: elige ficha y juega contra la máquina.
+            </p>
+          </div>
+          <form action="/alone" method="get">
+            <DrawablyButton
+              type="submit"
+              variant="solid"
+              stroke="var(--parchis-green)"
+              className="w-full select-none px-6 py-2.5 sm:w-auto"
+            >
+              Jugar solo con bots
+            </DrawablyButton>
+          </form>
+        </DrawablyCard>
 
         <p className="mt-4 text-center text-xs tracking-wide text-stone-500">
           Hecho a mano. Jugado entre amigos.
