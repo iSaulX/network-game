@@ -53,7 +53,8 @@ app/
   service-worker-register.tsx  Production-only `/sw.js` registration; dev unregisters leftovers (implemented)
   offline-indicator.tsx  Fixed "Sin conexión" drawably badge driven by online/offline events (implemented)
   alone/          `/alone` local setup: mode, colour, name and avatar selection (implemented)
-  play/           `/play` local game page: engine state + drawably panels around the square PixiJS board; modes/colours come from `/alone` query settings (implemented)
+  play/           `/play` local game page: engine reducer + bot policy, renders the shared `GameStage` around the square PixiJS board; modes/colours come from `/alone` query settings (implemented)
+  lan/            `/lan` LAN 1v1 pairing and game screen; client-only, no server (implemented)
   bots/           Full offline `/bots` route (pending Task 06)
   versus/         1v1 P2P lobby + game (pending Task 07, gated)
   api/
@@ -65,6 +66,7 @@ components/
   drawably-trigger-button.tsx  Ref-forwarding drawably button used as the HeroUI Popover trigger
   avatar-picker.tsx  Shared HeroUI avatar dropdown (drawably trigger + 8 drawably options) used by the homepage and `/alone`
   game/
+    game-stage.tsx    Shared, transport-agnostic game stage: header, seat grid, board wrapper, move popover, keyboard targets, sound popover, result overlay and optional banner. Used by `/play` and `/lan`
     parchis-board.tsx  Client component: mounts one square Pixi Application, loads chip textures, draws board/chips with view-relative numbers, interpolates chip movement, and reports token taps
     board-drawing.ts   Pixi drawing: one static BoardScene (walnut table, oak frame, grain, homes/flowers, corridors, player-relative numbers, goal X, free-hand borders) plus reusable destination/chip layers
     game-players.ts    Mode/colour/name/avatar setup, avatar allowlist, opposite-corner pairs, bot roster and engine configs; setup tests in the shared suite
@@ -72,12 +74,20 @@ components/
     dice-card.tsx      Minimal drawably dice tray per player: two tiles, active-seat colour border, barrier choice and bonus badge only when needed
     game-result.ts     Pure post-game copy/image mapping: human win vs loss, winner name, win/loser artwork, Spanish title/description/alt
     game-result.test.ts  Result-copy and artwork tests for win, loss and blank winner names
-    game-result-overlay.tsx  Full-screen post-game alertdialog: 10 px backdrop blur, win/loser art, dynamic Spanish copy, focus trap, Jugar de nuevo / Volver al inicio actions
+    game-result-overlay.tsx  Full-screen post-game alertdialog: 10 px backdrop blur, win/loser art, dynamic Spanish copy, focus trap, Jugar de nuevo (hidden when no handler) / Volver al inicio actions
     game-feedback.ts   Shared `useGameFeedback` hook: human-only haptics, preloaded `/sounds` dice/move clips, a synthesized Web Audio palette, and per-category sound mutes; lazily unlocked by the first gesture
     game-feedback-cues.ts  Pure state-event → feedback-cue classifier; picks one meaningful cue per batch
     game-feedback-cues.test.ts  Cue priority/coalescing tests (win, capture, goal, three doubles, barrier, move, entry, roll, pass)
     game-sound-settings.ts  SoundName → category mapping, Spanish labels, mute-state helpers
     sound-settings-popover.tsx  Drawably sound settings popover: master + 10 per-category mute checkboxes; backdrop/Escape/close, focus restore
+  lan/
+    roster.ts       LAN colours (host red / guest yellow), engine colours, default profiles and `createLanProfiles`/`createLanConfigs`
+    qr-code.tsx     `QRCodeSVG` of one pairing part plus previous/next part controls
+    pairing-code-box.tsx  Whole outgoing code in a read-only textarea + Copiar código, and the paste field (entero o por partes)
+    camera-scanner.tsx  Explicit-gesture camera capture, `BarcodeDetector` or `jsqr` fallback, dedupe, Spanish failure copy
+    connection-status.tsx  `describePairing` state text with a colour-coded drawably badge and `aria-live`
+    lan-game-screen.tsx  Mounts `GameStage` from a session snapshot: turn gating, event feedback, roll animation, slow/connection banners
+    lan-client.tsx  Support guard, role choice, profile fields, pairing panel and the game screen
 public/
   fonts/          OpenRunde Regular/Medium/Semibold/Bold (woff/otf)
   icons/          PWA icons + Apple touch icon (placeholder artwork; a later icon task replaces it)
@@ -98,8 +108,17 @@ lib/
     board-geometry.test.ts  `bun test` coverage for the reference geometry, adjacency, positions, and player view
     presentation.ts    Pure engine→artwork bridge: colour mapping, chip layout/stacking, destinations, two-die views with used flags, board-percent anchors, Spanish progress labels
     presentation.test.ts  Colour mapping, safe-mark alignment, chip stacking, destination dedupe, two-die visibility/used flags, board anchors
-  party/          Shared protocol, transport/session abstractions, client API/WS/WebRTC
-  server/party/   Server-only store, HTTP services, WS/signaling layer (pending Tasks 04/07)
+  party/          Shared protocol, transport/session abstractions, WebRTC transport, host/guest sessions and the LAN pairing hook
+    protocol.ts   Wire messages, structural `decodeWireMessage` validation, size caps, data-channel label
+    errors.ts     `PartyErrorCode` catalogue
+    authority.ts  Pure action validation/versioning/event extraction and the per-peer rate limiter
+    transport.ts  `GameTransport` interface and the in-memory test pair
+    session.ts    Abstract `GameSession` + `SessionSnapshot` (the only game API the UI uses)
+    lan-colors.ts Shared LAN engine colours (host yellow, guest green) for sessions and the UI roster
+    webrtc/       Types, pairing encoding (`fflate` + FNV-1a), signaling/ICE/pairing codes, data-channel transport, reducer copy, support screening
+    sessions/     `WebRTCHostSession` (authoritative) and `WebRTCGuestSession` (intent sender)
+    lan/          `useLanSession` orchestration hook
+  server/party/   Server-only store, HTTP services, WS/signaling layer (pending Tasks 04/07; unused by LAN play)
   bots/           Pure deterministic local bot policy and tests (implemented; used by `/play`)
   local-game/     Local controller + localStorage persistence (pending Task 06)
 scripts/
@@ -137,6 +156,7 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 | `/alone` | Local setup: choose 1v1 or all-vs-all, colour, name and avatar; native GET to `/play` (implemented) | Client state only; no persistence |
 | `/play` | Local game configured by `/alone` query settings, with PixiJS board, human-relative view, drawably player/dice cards, the pure bot policy and an auto-play checkbox for the human seat (implemented; precached, playable offline) | `mode`, `color`, `name`, `avatar`; human + bots; `GameState` and auto-mode state in browser memory; no network/persistence |
 | `/offline` | Static offline fallback page, precached and used for uncached navigations (implemented) | Static |
+| `/lan` | LAN 1v1: role choice, QR/paste pairing, then the shared `GameStage` driven by a WebRTC session (implemented; precached) | Host-authoritative `GameState` over an `RTCDataChannel`; no server, no persistence |
 | `/bots` | Local game vs 3 bots, fully offline (pending Task 06) | Engine state in browser memory + `localStorage` |
 | `/versus/[code]` | 1v1 P2P lobby and game over WebRTC (pending Task 07, gated) | Host-authoritative engine state; signaling via WS |
 | `/manifest.webmanifest` | Static PWA manifest in `public/manifest.webmanifest` | Static |
@@ -234,15 +254,15 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Integration choice:** the service worker is hand-written and generated, not Serwist. `@serwist/turbopack` 9.5.13 is the current stable Turbopack integration, but its route-handler implementation explicitly targets projects **without** `cacheComponents`, which this app enables (`next.config.ts`), and the Serwist 10 line is still a preview. The brief permits a hand-written worker plus a generated precache manifest as a fallback; the fallback was chosen to avoid a build-time incompatibility. `@serwist/next`'s webpack plugin cannot be used with the Turbopack build.
 - **Source and output:** `scripts/service-worker-template.js` is the source; `scripts/generate-service-worker.mjs` replaces `__BUILD_REVISION__` and `__PRECACHE_MANIFEST__` and writes `public/sw.js` after `next build`. `public/sw.js`, `public/sw.js.map` and `public/swe-worker*` are generated and git-ignored. The worker is served at `/sw.js`.
 - **Build-adapter compatibility:** the generator reads `.next/prerender-manifest.json` to confirm the four offline routes are prerendered, instead of requiring `.next/server/app/*.html` to exist on disk. Build adapters that run `onBuildComplete` (for example Vercel's, which packages and relocates those HTML files into `.vercel/output` before `next build` exits) would otherwise make the post-build step fail with `Missing prerendered route`. The worker precaches URLs, not files, so the HTML files are only measured for the logged size and are skipped when absent.
-- **Precache:** all app routes needed offline (`/`, `/alone`, `/play`, `/offline`), `/manifest.webmanifest`, `/favicon.ico`, every `/_next/static/**` file (JS chunks, CSS, hashed `next/font` media), and every file under `public/` (icons, avatars, chip/token art, dice faces/source art, mode images, supplied sounds, result artwork, button icons, font originals and starter SVGs). The generated worker itself is excluded. The current build produces 101 entries, about 60.7 MiB. The build ID from `.next/BUILD_ID` is the cache revision and is embedded in the worker.
-- **Navigation:** network-first with a 3 s timeout and `navigationPreload` where supported. On a network failure/timeout, the matching precached route is used (`/`, `/alone`, `/play`, `/offline`, query strings ignored); any other path falls back to `/offline`. A network 4xx is returned as-is; a 5xx falls back to cache.
+- **Precache:** all app routes needed offline (`/`, `/alone`, `/play`, `/lan`, `/offline`), `/manifest.webmanifest`, `/favicon.ico`, every `/_next/static/**` file (JS chunks, CSS, hashed `next/font` media), and every file under `public/` (icons, avatars, chip/token art, dice faces/source art, mode images, supplied sounds, result artwork, button icons, font originals and starter SVGs). The generated worker itself is excluded. The current build produces 106 entries, about 60.9 MiB. The build ID from `.next/BUILD_ID` is the cache revision and is embedded in the worker.
+- **Navigation:** network-first with a 3 s timeout and `navigationPreload` where supported. On a network failure/timeout, the matching precached route is used (`/`, `/alone`, `/play`, `/lan`, `/offline`, query strings ignored); any other path falls back to `/offline`. A network 4xx is returned as-is; a 5xx falls back to cache.
 - **Static assets:** cache-first from the versioned precache, with a runtime cache for uncached same-origin static files. Audio range requests are answered with a `206 Partial Content` slice from the cached body. `next/image` optimizer responses are cached after first use; when offline (or when the optimizer fails), the worker serves the original precached public image for the `url` query parameter, so changing avatars and rolling dice still work on a cold offline load.
 - **API and WebSocket boundary:** `/api/*` is never intercepted or cached. WebSocket traffic is not intercepted, cached or replayed. No background sync, offline mutation queue, push notification or party-data caching. Online parties require connectivity.
 - **Client-router payloads:** requests with `RSC`/`Next-Router-Prefetch` headers are left network-only. Offline, Next.js falls back to a document navigation, which the worker serves from the route cache (verified with the `/play` → `/` "Volver al inicio" button).
 - **Cache lifecycle:** cache name `parchis-stars-<buildId>`; `skipWaiting: true` and `clients.claim: true`. Activation deletes every `parchis-stars-*` cache with a different build ID. The page is not automatically reloaded on `controllerchange`; a new build activates and the next load uses it.
 - **Registration:** `app/service-worker-register.tsx` is mounted once in `app/layout.tsx`. It registers `/sw.js` with scope `/` and `updateViaCache: "none"` only in production, only in a secure context and only when `serviceWorker` exists. In development it unregisters any leftover worker instead of registering one, so HMR is never controlled by a stale production cache. Errors are logged; rendering is never blocked.
 - **Headers (`next.config.ts`):** `/sw.js` gets `Content-Type: application/javascript; charset=utf-8`, `Cache-Control: no-cache, no-store, must-revalidate` and `Service-Worker-Allowed: /`; `/manifest.webmanifest` gets `Cache-Control: no-store`.
-- **Offline page:** `app/offline/page.tsx` is a static, precached drawably card with the Spanish heading **Sin conexión**, the body **No hay conexión a internet.**, a **Reintentar** reload button, and a **Jugar sin conexión** native form to `/alone`. It uses the same paper/ink theme and needs no network.
+- **Offline page:** `app/offline/page.tsx` is a static, precached drawably card with the Spanish heading **Sin conexión**, the body **No hay conexión a internet.**, a **Reintentar** reload button, and native form buttons to **Jugar sin conexión** (`/alone`) and **Jugar en la misma red** (`/lan`). It uses the same paper/ink theme and needs no network.
 - **Offline indicator:** `app/offline-indicator.tsx` listens to `online`/`offline`, reads `navigator.onLine` as a hint only, and renders a fixed, `pointer-events-none` drawably badge with **Sin conexión** while offline. It causes no layout shift and does not disable actions.
 - **Build/start:** `bun run build` runs `next build && node scripts/generate-service-worker.mjs`; `bun run build:sw` regenerates the worker from the current `.next` build; `next start` serves the result. There is no Task 04 custom server (`server.ts`) in this repository, so production testing used `next build && next start`; the existing `next dev` server is unaffected and registers no worker.
 - **Offline gameplay (extends the Task 05 brief):** all local `/alone` → `/play` assets are precached, so 1v1 and all-vs-all bot games load and play on a cold offline reload, including PixiJS board textures, avatar/mode/dice images, sounds and range requests. Online parties remain network-only.
@@ -285,6 +305,22 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Tests:** `bun test` (106 tests / 4,752 assertions across engine, rules, simulation, geometry, presentation, bot policy, local setup, feedback cues and result copy: setup, automatic entries (5/sum 5/double 5), separate dice/order/splitting, auto-pass, both-even own barriers (auto, choice, blocked skip), doubles/three-doubles, base Classic captures/safe/barriers/bonuses/win, purity/JSON, view corners and view-relative labels, bot capture/barrier/goal/risk/barrier-break/bonus/barrier-choice scenarios, feedback cue priority, win/loss result copy and artwork, plus 500 seeded two-dice games with invariant checks and a determinism replay). The simulation ran 176,423 actions (longest 639). The original Task 03 audit found no deviations in the one-die base rules; the two-dice variant is specified by the project owner and covered by this suite.
 - **Boundary:** the engine owns rules only. PixiJS renders the board; React/drawably render app chrome; networking (Task 04) and the local controller (Task 06) call these functions.
 
+## LAN 1v1 (WebRTC, no server) — implemented
+
+> Supersedes Task 07's intended design for this feature. Task 07 mandates a WebSocket signaling server and is gated behind Tasks 04–06; this implementation deliberately uses **manual signaling (QR + copy/paste)** so it needs no server, no API route and no internet on the LAN. The `/versus/[code]` route and `/api/p2p/*` described below are **not** part of it.
+
+- **Topology:** two browsers on the same LAN hold one `RTCPeerConnection` and one ordered, reliable `RTCDataChannel` labelled `parchis-v1`. There is no server, no `fetch`, no WebSocket and no persistence; everything runs in the browser, so the static PWA (`public/sw.js` precache) and the Tauri export keep working unchanged.
+- **Pairing:** manual, user-gesture driven. The host creates the data channel **before** the offer, waits for non-trickle ICE gathering, and shows the offer as `PARCHIS-LAN-1:<base64url(deflate(json{v,kind,id,sdp}))>`. That code is split into QR-sized parts (`PARCHIS-LAN-1.<id8>.<i>.<n>.<fnv8>.<chunk>`, ≤300 chars, FNV-1a checksum) for scanning, and the **whole** code (all parts, newline-separated) is shown and copied at once for copy/paste — a single part is never enough to negotiate. The guest pastes the offer, produces the answer and shows it back; the host applies it. `joinPairingParts` accepts out-of-order and duplicate parts and rejects mixed pairing ids. A 16 KB decompressed-size guard caps every code.
+- **ICE:** `stun:stun.cloudflare.com:3478` when `navigator.onLine`, an empty list when offline. Non-trickle gathering resolves on `icegatheringstate === "complete"` or an end-of-candidates null candidate, with a 2.5 s cap after which `localDescription` is used. There is **no TURN**, so routers with client/AP isolation or mDNS that cannot resolve between devices fail; the UI surfaces a Spanish failure and offers a retry.
+- **Secure context:** `RTCPeerConnection` only exists in a secure context. `getLanSupport()` screens `isSecureContext` and `RTCPeerConnection` before rendering any pairing UI, with Spanish copy. A raw `http://192.168.x.x:3000` origin cannot use this mode; HTTPS or an installed PWA (which keeps its HTTPS origin offline) can.
+- **Authority:** the host owns `GameState`, the version counter and the dice. `lib/party/authority.ts` validates actor → current turn → version → phase, applies the action through the pure engine inside `try`, increments the version and extracts the new events. Only `ROLL` draws dice, using `crypto.getRandomValues` with rejection sampling, so the guest structurally cannot send values. Guest actions are rate-limited per peer. Rejections send `ERROR` plus the authoritative state for resync.
+- **Protocol:** `HELLO`/`ACTION` (guest → host) and `START`/`STATE`/`ERROR`/`BYE` (host → guest), all structurally validated by `decodeWireMessage` (strings ≤24 chars, avatars allowlisted to `/pictures/*`, `MOVE` must be `ADVANCE` with an integer destination). Inbound messages are capped at 64 KB; outbound sends throw above 1 MB `bufferedAmount`. SDP and ICE are never logged or persisted.
+- **Sessions:** `WebRTCHostSession` and `WebRTCGuestSession` implement the same `GameSession` interface as the future WebSocket sessions, so `GameStage` is transport-agnostic. `dispose()` sends `BYE` before closing, so the guest learns the host left instead of hanging.
+- **Rules/UI:** 1v1 only; host is board **red** and guest **yellow**, with engine colours yellow/green derived from `lib/party/lan-colors.ts`. The host moves first. `LanGameScreen` reuses `GameStage` with `remoteHuman`, so the opponent seat reads **Rival** rather than **Bot**. There is no rematch (the result screen offers only **Volver al inicio**) and no host migration; joining again requires a new pairing.
+- **Feedback:** the dice tumble echoes the committed faces from the newest `roll` event on both devices and is skipped under `prefers-reduced-motion`. No `STATE` within 4 s shows "La conexión va lenta…".
+- **Trust:** the guest trusts the host's state and dice (no anti-cheat, no ranked play). This is a same-network, friends-only mode.
+- **Offline:** `/lan` is precached (`/lan` in `ROUTE_PATHS` and `["lan.html", "/lan"]` in the generator), so an installed PWA can pair and play with the WAN down, provided each device loaded the app once.
+
 ## Realtime parties and networking (planned Task 04)
 
 - **HTTP:** Next.js App Router route handlers under `app/api/parties/` create parties, join by code, expose public lobby info, and return authenticated reconnect snapshots.
@@ -308,9 +344,11 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Feedback:** haptics/sounds are centralized in `components/game/game-feedback.ts`: owner-supplied `/sounds/dice-roll.mp3` and `/sounds/click.mp3`, plus synthesized cues for the remaining events. Human-only haptics; bot and auto-play actions sound only.
 - **Still required by the Task 06 brief:** the separate `/bots` route, homepage/offline entry points, reusable `GameStage` API, versioned `localStorage` resume, and cold-offline verification. The brief's original one-die/human-red/pass assumptions predate the current two-dice variant; do not treat the `/bots` brief as implemented.
 
-## P2P 1v1 (planned Task 07 — gated)
+## P2P 1v1 (planned Task 07 — gated; a serverless LAN variant is implemented above)
 
 > **Gate:** Task 07 must only be started after Tasks 01–06 are complete and their `results/` summaries exist.
+>
+> **Note:** the LAN 1v1 feature documented above covers the 1v1-WebRTC goal for same-network play without any server. What remains below is the WS-signaled, room-code version; it is not implemented.
 
 - **Topology:** two players in a `p2p-1v1` room. The existing WebSocket server handles only signaling/presence; all gameplay messages travel over a reliable, ordered WebRTC `RTCDataChannel`.
 - **Authority:** the host peer owns the engine state, version, dice, and validation; the guest sends actions and adopts snapshots. This mirrors Task 04 and reuses the shared, browser-safe `lib/party/authority.ts`. The guest trusts the host; no anti-cheat or ranked play.
@@ -368,7 +406,8 @@ AGENTS.md         Project instructions (rewritten by `next dev`; do not edit)
 - **Game feedback (haptics + sounds, direct request):** complete — optional `web-haptics` vibration for human actions/results, owner-supplied `/sounds/dice-roll.mp3` and `/sounds/click.mp3`, synthesized cues for the remaining events, first-gesture audio unlock, bot/auto haptic suppression, and testable cue coalescing. See `results/haptics-sounds.md`.
 - **Sound settings (direct request):** complete — a header **Sonido** button opens a drawably popover with a top **Silenciar todos los sonidos** checkbox and 10 per-category mute checkboxes; changes apply live, checked means muted, and Escape/backdrop/× close with focus restore. See `results/sound-settings.md`.
 - **Auto-play (direct request):** complete — a **Modo automático** native checkbox above the human dice, using the bot policy for the human seat; unchecking cancels pending auto work and restores the controls. See `results/auto-mode.md`.
+- **LAN 1v1 (`/lan`, direct request, no task brief):** complete — serverless peer-to-peer 1v1 over WebRTC with manual QR/copy-paste signaling, host-authoritative engine state, shared `GameStage`, Spanish copy, precached route and tests. See `results/lan-multiplayer.md`.
 - **Task 04 — Realtime parties (API routes + WebSockets):** pending.
 - **Task 05 — Offline app shell (service worker + cache):** complete. See `results/05-offline-shell.md`. A generated hand-written worker precaches every route, `/_next/static` file and public asset under a build-revisioned cache; navigations are network-first with a 3 s timeout and route/offline fallback; `next/image` has an offline original-image fallback; `/api/*` and WebSockets are never cached. Registration is production-only. The PWA `start_url` is `/alone`. Local bot games are fully playable offline, including board/texture/image/sound assets.
 - **Task 06 — Offline bot mode (1 human + 3 bots, PixiJS board):** partially implemented through `/alone` → `/play` (all-vs-all and 1v1, chosen colour/name/avatar) with `lib/bots/policy.ts`, 1 s pacing and the Task 05 offline precache/entry point. The separate `/bots` route, `GameStage` abstraction, homepage entry and versioned `localStorage` resume remain pending.
-- **Task 07 — P2P 1v1 (WebRTC) + transport-agnostic sessions:** pending — **take only after Tasks 01–06 are complete and their results summaries exist.**
+- **Task 07 — P2P 1v1 (WebRTC) + transport-agnostic sessions:** the WS-signaled `/versus/[code]` version is pending — **take only after Tasks 01–06 are complete and their results summaries exist.** In the meantime a **serverless LAN 1v1** (manual QR/copy-paste signaling, no server, no internet) is implemented at `/lan`; see the "LAN 1v1" section and `results/lan-multiplayer.md`.

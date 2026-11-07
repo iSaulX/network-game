@@ -313,6 +313,28 @@ export default function Home() {
             </DrawablyButton>
           </form>
         </DrawablyCard>
+
+        <DrawablyCard className="mt-4 flex flex-col items-center justify-between gap-3 rounded-xl bg-[var(--drawably-paper)] p-4 text-center sm:flex-row sm:p-5 sm:text-left">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight">
+              Jugar 1 contra 1 en la misma red
+            </h2>
+            <p className="mt-1 text-sm leading-6 text-stone-600">
+              Sin internet: los dos dispositivos se conectan directamente. Solo
+              en la misma red Wi‑Fi.
+            </p>
+          </div>
+          <form action="/lan" method="get">
+            <DrawablyButton
+              type="submit"
+              variant="outline"
+              stroke="var(--parchis-blue)"
+              className="w-full select-none px-6 py-2.5 sm:w-auto"
+            >
+              Jugar en la misma red
+            </DrawablyButton>
+          </form>
+        </DrawablyCard>
       </div>
     </main>
   );

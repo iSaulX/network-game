@@ -8,7 +8,8 @@ import { getGameResultSummary } from "./game-result";
 export interface GameResultOverlayProps {
   humanWon: boolean;
   winnerName: string;
-  onPlayAgain: () => void;
+  /** Omit to hide the rematch button (a LAN guest cannot restart the match). */
+  onPlayAgain?: () => void;
   onGoHome: () => void;
 }
 
@@ -125,23 +126,25 @@ export function GameResultOverlay({
         </div>
 
         <div className="mx-auto mt-auto flex w-full max-w-md flex-col gap-3 pb-2 sm:flex-row sm:justify-center sm:pb-4">
-          <DrawablyButton
-            type="button"
-            variant="solid"
-            onClick={onPlayAgain}
-            className="flex w-full select-none items-center justify-center gap-2.5 px-6 py-3 text-base font-medium sm:flex-1"
-          >
-            <Image
-              src="/button-icons/new-game.png"
-              alt=""
-              width={1536}
-              height={1024}
-              sizes="32px"
-              aria-hidden="true"
-              className="h-8 w-8 shrink-0 object-cover invert"
-            />
-            <span>Jugar de nuevo</span>
-          </DrawablyButton>
+          {onPlayAgain && (
+            <DrawablyButton
+              type="button"
+              variant="solid"
+              onClick={() => onPlayAgain?.()}
+              className="flex w-full select-none items-center justify-center gap-2.5 px-6 py-3 text-base font-medium sm:flex-1"
+            >
+              <Image
+                src="/button-icons/new-game.png"
+                alt=""
+                width={1536}
+                height={1024}
+                sizes="32px"
+                aria-hidden="true"
+                className="h-8 w-8 shrink-0 object-cover invert"
+              />
+              <span>Jugar de nuevo</span>
+            </DrawablyButton>
+          )}
 
           <DrawablyButton
             type="button"

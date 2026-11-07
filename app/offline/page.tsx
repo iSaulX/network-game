@@ -25,8 +25,8 @@ export default function OfflinePage() {
           No hay conexión a internet.
         </p>
         <p className="mt-1 text-sm leading-6 text-stone-500">
-          Puedes seguir jugando contra los bots sin conexión. Las partidas en
-          línea necesitan red.
+          Puedes seguir jugando contra los bots sin conexión. Jugar con amigos
+          en la misma red Wi‑Fi tampoco necesita internet.
         </p>
 
         <div className="mt-6 flex flex-col gap-3">
@@ -50,10 +50,21 @@ export default function OfflinePage() {
               Jugar sin conexión
             </DrawablyButton>
           </form>
+
+          <form action="/lan" method="get">
+            <DrawablyButton
+              type="submit"
+              variant="outline"
+              stroke="var(--parchis-blue)"
+              className="w-full select-none px-6 py-2.5"
+            >
+              Jugar en la misma red
+            </DrawablyButton>
+          </form>
         </div>
 
         <p className="mt-5 text-xs leading-5 text-stone-500">
-          Vuelve a conectarte para crear o unirte a una partida con amigos.
+          El modo en red solo funciona entre dispositivos de la misma red Wi‑Fi.
         </p>
       </DrawablyCard>
     </main>

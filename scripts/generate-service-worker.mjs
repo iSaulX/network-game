@@ -50,6 +50,7 @@ const requiredRoutes = [
   ["index.html", "/"],
   ["alone.html", "/alone"],
   ["play.html", "/play"],
+  ["lan.html", "/lan"],
   ["offline.html", "/offline"],
 ];
 
