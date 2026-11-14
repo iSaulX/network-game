@@ -314,7 +314,7 @@ function PlayPageContent() {
       onChooseBarrier={handleChooseBarrier}
       onExit={() => router.push("/")}
       onNewGame={handleReset}
-      onChangeMode={() => router.push("/alone")}
+      onChangeMode={() => router.push("/")}
       autoControl={autoControl}
       playAgain={handleReset}
     />

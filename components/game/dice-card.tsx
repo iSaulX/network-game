@@ -24,8 +24,10 @@ export interface DiceCardProps {
   used: readonly [boolean, boolean];
   active: boolean;
   human: boolean;
-  /** False when the human's seat is on auto-play (no human controls). */
+  /** True when this device may act for the seat right now. */
   controllable: boolean;
+  /** True only when the human's seat is explicitly on auto-play. */
+  auto: boolean;
   rolling: boolean;
   rollingFaces: readonly [DieValue, DieValue] | null;
   onRoll: () => void;
@@ -90,6 +92,7 @@ export function DiceCard({
   active,
   human,
   controllable,
+  auto,
   rolling,
   rollingFaces,
   onRoll,
@@ -97,7 +100,6 @@ export function DiceCard({
 }: DiceCardProps) {
   const visibleValues = rolling && rollingFaces ? rollingFaces : values;
   const visibleUsed = rolling ? ([false, false] as const) : used;
-  const auto = human && !controllable;
   const canRoll =
     active &&
     human &&

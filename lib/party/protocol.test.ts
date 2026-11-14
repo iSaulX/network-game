@@ -2,19 +2,29 @@ import { describe, expect, test } from "bun:test";
 import {
   decodeWireMessage,
   encodeWireMessage,
+  PARTY_PROTOCOL_VERSION,
   type LanRoster,
   type WireMessage,
 } from "./protocol";
 import { createGame } from "@/lib/parchis";
 
 const ROSTER: LanRoster = {
-  host: { id: "host", name: "Ana", avatar: "/pictures/dog.png" },
-  guest: { id: "guest", name: "Bruno", avatar: "/pictures/octupus.png" },
+  players: [
+    { id: "host", name: "Ana", avatar: "/pictures/dog.png" },
+    { id: "guest-1", name: "Bruno", avatar: "/pictures/octupus.png" },
+  ],
+};
+
+const SOLO_ROSTER: LanRoster = {
+  players: [
+    { id: "host", name: "Ana", avatar: "/pictures/dog.png" },
+    { id: "bot-yellow", name: "Carla", avatar: "/pictures/chicken.png" },
+  ],
 };
 
 const STATE = createGame([
   { id: "host", color: "red" },
-  { id: "guest", color: "yellow" },
+  { id: "guest-1", color: "yellow" },
 ]);
 
 describe("wire protocol", () => {
@@ -22,34 +32,52 @@ describe("wire protocol", () => {
     const messages: WireMessage[] = [
       {
         type: "HELLO",
-        protocol: 1,
-        role: "guest",
-        player: ROSTER.guest,
+        protocol: PARTY_PROTOCOL_VERSION,
+        player: { id: "guest-1", name: "Bruno", avatar: "/pictures/dog.png" },
       },
       {
         type: "ACTION",
-        protocol: 1,
+        protocol: PARTY_PROTOCOL_VERSION,
         version: 3,
         action: { type: "ROLL" },
         requestId: "req-1",
       },
-      { type: "START", protocol: 1, version: 0, roster: ROSTER, state: STATE },
+      {
+        type: "LOBBY",
+        protocol: PARTY_PROTOCOL_VERSION,
+        mode: "1v1",
+        players: [
+          { id: "host", name: "Ana", avatar: "/pictures/dog.png" },
+          { id: "guest-1", name: "Bruno", avatar: "/pictures/octupus.png" },
+        ],
+      },
+      {
+        type: "START",
+        protocol: PARTY_PROTOCOL_VERSION,
+        version: 0,
+        roster: ROSTER,
+        state: STATE,
+      },
       {
         type: "STATE",
-        protocol: 1,
+        protocol: PARTY_PROTOCOL_VERSION,
         version: 1,
         state: STATE,
         events: [],
       },
       {
         type: "ERROR",
-        protocol: 1,
+        protocol: PARTY_PROTOCOL_VERSION,
         version: 2,
         code: "STALE_VERSION",
         message: "stale",
         state: STATE,
       },
-      { type: "BYE", protocol: 1, reason: "host-closed" },
+      {
+        type: "BYE",
+        protocol: PARTY_PROTOCOL_VERSION,
+        reason: "host-closed",
+      },
     ];
 
     for (const message of messages) {
@@ -61,17 +89,44 @@ describe("wire protocol", () => {
     }
   });
 
+  test("accepts a roster that seats bots in empty places", () => {
+    const message = {
+      type: "START",
+      protocol: PARTY_PROTOCOL_VERSION,
+      version: 0,
+      roster: SOLO_ROSTER,
+      state: STATE,
+    };
+
+    expect(decodeWireMessage(JSON.stringify(message)).ok).toBeTrue();
+  });
+
   test("rejects unknown types, wrong protocols and non-text input", () => {
     expect(decodeWireMessage(42).ok).toBeFalse();
     expect(decodeWireMessage("{not json").ok).toBeFalse();
-    expect(decodeWireMessage(JSON.stringify({ type: "NOPE", protocol: 1 })).ok).toBeFalse();
     expect(
-      decodeWireMessage(JSON.stringify({ type: "START", protocol: 2, version: 0, roster: ROSTER, state: STATE })),
+      decodeWireMessage(JSON.stringify({ type: "NOPE", protocol: PARTY_PROTOCOL_VERSION })).ok,
+    ).toBeFalse();
+    expect(
+      decodeWireMessage(
+        JSON.stringify({
+          type: "START",
+          protocol: 1,
+          version: 0,
+          roster: ROSTER,
+          state: STATE,
+        }),
+      ),
     ).toMatchObject({ ok: false, code: "PROTOCOL_MISMATCH" });
   });
 
   test("rejects malformed actions", () => {
-    const base = { type: "ACTION", protocol: 1, version: 1, requestId: "r" };
+    const base = {
+      type: "ACTION",
+      protocol: PARTY_PROTOCOL_VERSION,
+      version: 1,
+      requestId: "r",
+    };
 
     expect(
       decodeWireMessage(JSON.stringify({ ...base, action: { type: "ROLL", dice: [1, 2] } })).ok,
@@ -87,30 +142,56 @@ describe("wire protocol", () => {
     ).toBeFalse();
   });
 
-  test("rejects a HELLO that does not identify the guest", () => {
-    const hello = {
-      type: "HELLO",
-      protocol: 1,
-      role: "guest",
-      player: { ...ROSTER.guest, id: "host" },
+  test("rejects a HELLO from the host or a bot seat", () => {
+    for (const id of ["host", "bot-red"] as const) {
+      const hello = {
+        type: "HELLO",
+        protocol: PARTY_PROTOCOL_VERSION,
+        player: { id, name: "Ana", avatar: "/pictures/dog.png" },
+      };
+      expect(decodeWireMessage(JSON.stringify(hello)).ok).toBeFalse();
+    }
+  });
+
+  test("rejects a LOBBY with duplicated seats or too many rows", () => {
+    const duplicated = {
+      type: "LOBBY",
+      protocol: PARTY_PROTOCOL_VERSION,
+      mode: "all",
+      players: [
+        { id: "host", name: "Ana", avatar: "/pictures/dog.png" },
+        { id: "host", name: "Bruno", avatar: "/pictures/octupus.png" },
+      ],
     };
-    expect(decodeWireMessage(JSON.stringify(hello)).ok).toBeFalse();
+    expect(decodeWireMessage(JSON.stringify(duplicated)).ok).toBeFalse();
+
+    const oversized = {
+      type: "LOBBY",
+      protocol: PARTY_PROTOCOL_VERSION,
+      mode: "all",
+      players: [
+        { id: "host", name: "Ana", avatar: "/pictures/dog.png" },
+        { id: "guest-1", name: "B", avatar: "/pictures/dog.png" },
+        { id: "guest-2", name: "C", avatar: "/pictures/dog.png" },
+        { id: "guest-3", name: "D", avatar: "/pictures/dog.png" },
+        { id: "guest-4", name: "E", avatar: "/pictures/dog.png" },
+      ],
+    };
+    expect(decodeWireMessage(JSON.stringify(oversized)).ok).toBeFalse();
   });
 
   test("rejects non-allowlisted avatars and oversized names", () => {
     const hello = {
       type: "HELLO",
-      protocol: 1,
-      role: "guest",
-      player: { id: "guest", name: "x".repeat(25), avatar: "/pictures/dog.png" },
+      protocol: PARTY_PROTOCOL_VERSION,
+      player: { id: "guest-1", name: "x".repeat(25), avatar: "/pictures/dog.png" },
     };
     expect(decodeWireMessage(JSON.stringify(hello)).ok).toBeFalse();
 
     const remoteAvatar = {
       type: "HELLO",
-      protocol: 1,
-      role: "guest",
-      player: { id: "guest", name: "ok", avatar: "https://evil.example/x.png" },
+      protocol: PARTY_PROTOCOL_VERSION,
+      player: { id: "guest-1", name: "ok", avatar: "https://evil.example/x.png" },
     };
     expect(decodeWireMessage(JSON.stringify(remoteAvatar)).ok).toBeFalse();
   });
@@ -118,7 +199,7 @@ describe("wire protocol", () => {
   test("rejects a message above the size cap", () => {
     const big = JSON.stringify({
       type: "STATE",
-      protocol: 1,
+      protocol: PARTY_PROTOCOL_VERSION,
       version: 1,
       state: STATE,
       events: [],

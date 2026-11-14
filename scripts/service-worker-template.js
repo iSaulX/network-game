@@ -19,7 +19,7 @@ const CACHE_NAME = `${CACHE_PREFIX}${BUILD_REVISION}`;
 const OFFLINE_URL = "/offline";
 const NAVIGATION_TIMEOUT_MS = 3000;
 const PRECACHE_CONCURRENCY = 6;
-const ROUTE_PATHS = new Set(["/", "/alone", "/play", "/lan", OFFLINE_URL]);
+const ROUTE_PATHS = new Set(["/", "/play", OFFLINE_URL]);
 const STATIC_PREFIXES = [
   "/_next/static/",
   "/icons/",

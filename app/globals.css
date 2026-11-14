@@ -104,3 +104,213 @@ html .drawably-badge {
     animation: none;
   }
 }
+
+/*
+ * transitions.dev recipes (free tier): skeleton reveal, icon swap and the
+ * success check. Variables are prefixed to keep the global scope tidy.
+ */
+:root {
+  --t-pulse-dur: 1100ms;
+  --t-pulse-min: 0.45;
+  --t-reveal-dur: 320ms;
+  --t-reveal-blur: 2px;
+  --t-reveal-ease: ease-in-out;
+  --t-icon-swap-dur: 220ms;
+  --t-icon-swap-blur: 2px;
+  --t-icon-swap-start-scale: 0.35;
+  --t-icon-swap-ease: ease-in-out;
+  --t-check-opacity-dur: 380ms;
+  --t-check-rotate-dur: 420ms;
+  --t-check-rotate-from: 70deg;
+  --t-check-bob-dur: 420ms;
+  --t-check-y-amount: 10px;
+  --t-check-blur-dur: 380ms;
+  --t-check-blur-from: 6px;
+  --t-check-path-dur: 320ms;
+  --t-check-path-delay: 60ms;
+  --t-check-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --t-check-ease-bob: cubic-bezier(0.34, 1.35, 0.64, 1);
+}
+
+/* Skeleton: the placeholder sits on top of the real content and cross-fades. */
+.t-skel {
+  position: relative;
+}
+
+.t-skel-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 1;
+  filter: blur(0);
+  transition:
+    opacity var(--t-reveal-dur) var(--t-reveal-ease),
+    filter var(--t-reveal-dur) var(--t-reveal-ease);
+}
+
+.t-skel-content {
+  position: relative;
+  z-index: 2;
+  opacity: 0;
+  filter: blur(var(--t-reveal-blur));
+  transition:
+    opacity var(--t-reveal-dur) var(--t-reveal-ease),
+    filter var(--t-reveal-dur) var(--t-reveal-ease);
+}
+
+.t-skel.is-revealed .t-skel-skeleton {
+  opacity: 0;
+  filter: blur(var(--t-reveal-blur));
+}
+
+.t-skel.is-revealed .t-skel-content {
+  opacity: 1;
+  filter: blur(0);
+}
+
+/* Pulse lives on the bars so the skeleton's own opacity stays free. */
+.t-skel-skeleton.is-pulsing > * {
+  animation: t-skel-pulse var(--t-pulse-dur) ease-in-out infinite;
+}
+
+@keyframes t-skel-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: var(--t-pulse-min);
+  }
+}
+
+/* Icon swap: two icons stacked in one grid cell. */
+.t-icon-swap {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+}
+
+.t-icon-swap .t-icon {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    opacity var(--t-icon-swap-dur) var(--t-icon-swap-ease),
+    filter var(--t-icon-swap-dur) var(--t-icon-swap-ease),
+    transform var(--t-icon-swap-dur) var(--t-icon-swap-ease);
+  will-change: opacity, filter, transform;
+}
+
+.t-icon-swap[data-state="a"] .t-icon[data-icon="a"],
+.t-icon-swap[data-state="b"] .t-icon[data-icon="b"] {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+}
+
+.t-icon-swap[data-state="a"] .t-icon[data-icon="b"],
+.t-icon-swap[data-state="b"] .t-icon[data-icon="a"] {
+  opacity: 0;
+  filter: blur(var(--t-icon-swap-blur));
+  transform: scale(var(--t-icon-swap-start-scale));
+}
+
+/* Success check: fade + rotate upright + blur + bob, plus a path draw. */
+.t-success-check {
+  display: inline-block;
+  transform-origin: center;
+  opacity: 0;
+  will-change: transform, opacity, filter;
+}
+
+.t-success-check svg {
+  display: block;
+  overflow: visible;
+}
+
+.t-success-check svg path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+}
+
+.t-success-check[data-state="in"] {
+  animation:
+    t-check-fade var(--t-check-opacity-dur) var(--t-check-ease-out) forwards,
+    t-check-rotate var(--t-check-rotate-dur) var(--t-check-ease-out) forwards,
+    t-check-blur var(--t-check-blur-dur) var(--t-check-ease-out) forwards,
+    t-check-bob var(--t-check-bob-dur) var(--t-check-ease-bob) forwards;
+}
+
+.t-success-check[data-state="in"] svg path {
+  animation: t-check-draw var(--t-check-path-dur) var(--t-check-ease-out)
+    var(--t-check-path-delay) forwards;
+}
+
+@keyframes t-check-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes t-check-rotate {
+  from {
+    transform: rotate(var(--t-check-rotate-from));
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes t-check-blur {
+  from {
+    filter: blur(var(--t-check-blur-from));
+  }
+  to {
+    filter: blur(0);
+  }
+}
+
+@keyframes t-check-bob {
+  from {
+    translate: 0 var(--t-check-y-amount);
+  }
+  to {
+    translate: 0 0;
+  }
+}
+
+@keyframes t-check-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-skel-skeleton,
+  .t-skel-content {
+    transition: none !important;
+  }
+
+  .t-skel-skeleton.is-pulsing > * {
+    animation: none !important;
+  }
+
+  .t-icon-swap .t-icon {
+    transition: none !important;
+  }
+
+  .t-success-check {
+    animation: none !important;
+    opacity: 1;
+  }
+
+  .t-success-check svg path {
+    animation: none !important;
+    stroke-dashoffset: 0 !important;
+  }
+}

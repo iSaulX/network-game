@@ -6,6 +6,7 @@ import type {
   Move,
 } from "@/lib/parchis/types";
 import { createGame } from "@/lib/parchis";
+import { chooseBarrier, chooseBonusMove, chooseMove } from "../../bots/policy";
 import {
   applyAction,
   createRateLimiter,
@@ -13,11 +14,12 @@ import {
   type AuthorityResult,
 } from "../authority";
 import {
+  isBotId,
   PARTY_PROTOCOL_VERSION,
   type ClientAction,
+  type GameMode,
   type LanPlayerInfo,
   type LanRoster,
-  type PartyErrorCode,
   type WireMessage,
 } from "../protocol";
 import {
@@ -26,75 +28,90 @@ import {
   type SessionSnapshot,
 } from "../session";
 import type { GameTransport, TransportKind } from "../transport";
-import {
-  LAN_GUEST_ENGINE_COLOR,
-  LAN_HOST_ENGINE_COLOR,
-} from "../lan-colors";
+import { buildConfigs, buildRoster } from "../seats";
+
+/** A guest connection owned by the host. */
+export interface HostPeer {
+  readonly playerId: string;
+  readonly transport: GameTransport;
+}
 
 export interface HostSessionOptions {
-  readonly transport: GameTransport;
-  readonly roster: LanRoster;
+  /** The host's own seat. */
+  readonly host: LanPlayerInfo;
+  readonly mode: GameMode;
   /** Injected in tests; defaults to uniform crypto dice. */
   readonly rollDice?: () => [DieValue, DieValue];
   readonly rateLimit?: { readonly limit: number; readonly windowMs: number };
   readonly now?: () => number;
+  /** Delay between two automatic bot actions, in ms. */
+  readonly botDelayMs?: number;
+  /** Injected in tests; defaults to `setTimeout`. */
+  readonly schedule?: (run: () => void, delayMs: number) => unknown;
+  readonly cancelSchedule?: (handle: unknown) => void;
+}
+
+interface PeerState {
+  readonly playerId: string;
+  readonly transport: GameTransport;
+  info: LanPlayerInfo | null;
+  readonly unsubscribe: () => void;
+  readonly unsubscribeStatus: () => void;
 }
 
 /**
- * The authoritative peer. It owns the game state and version, applies both its
- * own actions and guest intents through the shared authority, and broadcasts
- * every accepted state to the guest.
+ * The authoritative peer. It owns the game state and version, opens one
+ * transport per guest, applies both its own actions and guest intents through
+ * the shared authority, and broadcasts every accepted state to everyone.
+ *
+ * The match starts only when the host calls `start()`; empty seats become bots
+ * at that moment. Bots, and guests whose connection dropped mid-match, are
+ * played by the host with the same policy as the offline mode.
  */
 export class WebRTCHostSession extends GameSession {
-  readonly playerId = "host" as const;
-  readonly transportKind: TransportKind;
+  readonly playerId: string;
+  readonly transportKind: TransportKind = "webrtc";
 
-  private readonly transport: GameTransport;
-  private readonly roster: LanRoster;
+  private readonly host: LanPlayerInfo;
+  private readonly mode: GameMode;
   private readonly drawDice: () => [DieValue, DieValue];
   private readonly allowAction: (key: string) => boolean;
   private readonly notifier = new SessionNotifier();
-  private readonly unsubscribe: () => void;
+  private readonly peers = new Map<string, PeerState>();
+  private readonly botDelayMs: number;
+  private readonly schedule: (run: () => void, delayMs: number) => unknown;
+  private readonly cancelSchedule: (handle: unknown) => void;
 
   private game: GameState | null = null;
   private version = 0;
-  private status: SessionSnapshot["status"] = "connecting";
+  private status: SessionSnapshot["status"] = "idle";
   private error: SessionSnapshot["error"] = null;
-  private peer: LanPlayerInfo | null = null;
   private events: readonly GameEvent[] = [];
-  private armed = false;
+  private lobby: readonly LanPlayerInfo[] = [];
+  private roster: LanRoster | null = null;
+  private disconnected: readonly string[] = [];
   private disposed = false;
+  private botTimer: unknown = null;
 
   constructor(options: HostSessionOptions) {
     super();
-    this.transport = options.transport;
-    this.roster = options.roster;
-    this.transportKind = options.transport.kind;
+    this.host = { ...options.host, id: "host" };
+    this.playerId = "host";
+    this.mode = options.mode;
     this.drawDice = options.rollDice ?? cryptoDice();
     this.allowAction = createRateLimiter(
       options.rateLimit?.limit ?? 12,
       options.rateLimit?.windowMs ?? 1000,
       options.now,
     );
-
-    this.unsubscribe = this.transport.subscribe((message) => {
-      this.receive(message);
-    });
-
-    this.transport.subscribeStatus((next) => {
-      if (next === "open") {
-        this.setStatus("connected");
-      } else if (next === "failed") {
-        this.setStatus("failed");
-      } else if (next === "closed") {
-        this.setStatus("closed");
-      }
-    });
-
-    // The channel may already be open when the session is created.
-    if (this.transport.status === "open") {
-      this.status = "connected";
-    }
+    this.botDelayMs = options.botDelayMs ?? 700;
+    this.schedule =
+      options.schedule ??
+      ((run, delayMs) => globalThis.setTimeout(run, delayMs));
+    this.cancelSchedule =
+      options.cancelSchedule ??
+      ((handle) => globalThis.clearTimeout(handle as number));
+    this.lobby = [this.host];
   }
 
   get snapshot(): SessionSnapshot {
@@ -104,8 +121,10 @@ export class WebRTCHostSession extends GameSession {
       status: this.status,
       events: this.events,
       error: this.error,
-      peer: this.peer,
+      lobby: this.lobby,
       roster: this.roster,
+      disconnected: this.disconnected,
+      mode: this.mode,
     };
   }
 
@@ -113,31 +132,91 @@ export class WebRTCHostSession extends GameSession {
     return this.notifier.subscribe(listener);
   }
 
-  start(): void {
-    this.armed = true;
-    if (this.transport.status === "closed" || this.transport.status === "failed") {
+  /**
+   * Connects a guest transport. Call it once per seat as soon as the guest's
+   * direct connection is up; the seat joins the lobby after its HELLO.
+   */
+  joinPeer(peer: HostPeer): void {
+    if (this.disposed || this.peers.has(peer.playerId)) {
       return;
     }
-    void this.transport.connect().catch(() => {
-      this.setStatus("failed");
+
+    const unsubscribe = peer.transport.subscribe((message) => {
+      this.receive(peer.playerId, message);
     });
+
+    const unsubscribeStatus = peer.transport.subscribeStatus((next) => {
+      if (next === "failed" || next === "closed") {
+        this.handlePeerGone(peer.playerId);
+      }
+    });
+
+    this.peers.set(peer.playerId, {
+      playerId: peer.playerId,
+      transport: peer.transport,
+      info: null,
+      unsubscribe,
+      unsubscribeStatus,
+    });
+
+    const onOpen = () => {
+      this.status = "connected";
+      this.notifier.emit(this.snapshot);
+    };
+
+    if (peer.transport.status === "open") {
+      onOpen();
+    } else {
+      peer.transport.subscribeStatus((next) => {
+        if (next === "open") {
+          onOpen();
+        }
+      });
+
+      void peer.transport.connect().catch(() => {
+        this.handlePeerGone(peer.playerId);
+      });
+    }
+  }
+
+  /** Drops a guest seat (the guest left the lobby, or its channel failed). */
+  removePeer(playerId: string): void {
+    this.handlePeerGone(playerId);
+  }
+
+  /** Starts the match. Empty seats become bots; nobody has to wait. */
+  start(): void {
+    if (this.disposed || this.game) {
+      return;
+    }
+
+    this.roster = buildRoster(this.mode, this.lobby);
+    this.game = createGame(buildConfigs(this.roster));
+    this.version = 0;
+    this.status = "connected";
+    this.error = null;
+    this.events = [];
+    this.disconnected = [];
+
+    this.broadcastStart();
+    this.scheduleBotIfNeeded();
     this.notifier.emit(this.snapshot);
   }
 
   roll(): void {
-    this.act({ type: "ROLL" });
+    this.act({ type: "ROLL" }, this.playerId);
   }
 
   move(move: Move): void {
-    this.act({ type: "MOVE", move });
+    this.act({ type: "MOVE", move }, this.playerId);
   }
 
   bonusMove(move: BonusMove): void {
-    this.act({ type: "BONUS_MOVE", move });
+    this.act({ type: "BONUS_MOVE", move }, this.playerId);
   }
 
   chooseBarrier(progress: number): void {
-    this.act({ type: "CHOOSE_BARRIER", progress });
+    this.act({ type: "CHOOSE_BARRIER", progress }, this.playerId);
   }
 
   dispose(): void {
@@ -145,40 +224,41 @@ export class WebRTCHostSession extends GameSession {
       return;
     }
     this.disposed = true;
+    this.clearBotTimer();
 
-    if (this.status === "connected") {
-      // Tell the guest the match is over before the channel disappears.
-      try {
-        this.transport.send({
-          type: "BYE",
-          protocol: PARTY_PROTOCOL_VERSION,
-          reason: "host-closed",
-        });
-      } catch {
-        // The channel may already be gone; closing below is enough.
+    if (this.game) {
+      // Tell every guest the match is over before the channels disappear.
+      for (const peer of this.peers.values()) {
+        try {
+          peer.transport.send({
+            type: "BYE",
+            protocol: PARTY_PROTOCOL_VERSION,
+            reason: "host-closed",
+          });
+        } catch {
+          // The channel may already be gone; closing below is enough.
+        }
       }
     }
 
-    this.unsubscribe();
+    for (const peer of this.peers.values()) {
+      peer.unsubscribe();
+      peer.unsubscribeStatus();
+      peer.transport.close();
+    }
+    this.peers.clear();
     this.notifier.clear();
-    this.transport.close();
-    this.setStatus("closed");
+    this.status = "closed";
   }
 
-  private setStatus(next: SessionSnapshot["status"]): void {
-    if (this.status === next) {
-      return;
-    }
-    this.status = next;
-    this.notifier.emit(this.snapshot);
-  }
+  // -- internals -----------------------------------------------------------
 
-  private act(action: ClientAction): void {
-    if (!this.game || this.status !== "connected") {
+  private act(action: ClientAction, actorId: string): void {
+    if (!this.game || this.status !== "connected" || this.disposed) {
       return;
     }
 
-    this.applyAndBroadcast(action, this.playerId);
+    this.applyAndBroadcast(action, actorId);
   }
 
   private applyAndBroadcast(action: ClientAction, actorId: string): boolean {
@@ -201,13 +281,8 @@ export class WebRTCHostSession extends GameSession {
     }
 
     this.commit(result);
-    this.send({
-      type: "STATE",
-      protocol: PARTY_PROTOCOL_VERSION,
-      version: this.version,
-      state: result.state,
-      events: result.events,
-    });
+    this.broadcastState();
+    this.scheduleBotIfNeeded();
 
     return true;
   }
@@ -220,13 +295,17 @@ export class WebRTCHostSession extends GameSession {
     this.notifier.emit(this.snapshot);
   }
 
-  private receive(message: WireMessage): void {
+  private receive(playerId: string, message: WireMessage): void {
     if (this.disposed) {
       return;
     }
 
+    if (!this.peers.has(playerId)) {
+      return;
+    }
+
     if (message.type === "HELLO") {
-      this.handleHello(message.player);
+      this.handleHello(playerId, message.player);
       return;
     }
 
@@ -235,27 +314,44 @@ export class WebRTCHostSession extends GameSession {
     }
 
     if (!this.game) {
-      this.sendError("NOT_READY", "The game has not started yet.");
+      this.sendTo(playerId, {
+        type: "ERROR",
+        protocol: PARTY_PROTOCOL_VERSION,
+        version: this.version,
+        code: "NOT_READY",
+        message: "The match has not started yet.",
+      });
       return;
     }
 
-    if (!this.allowAction("guest")) {
-      this.sendError("RATE_LIMITED", "Too many actions.");
+    if (!this.allowAction(playerId)) {
+      this.sendTo(playerId, {
+        type: "ERROR",
+        protocol: PARTY_PROTOCOL_VERSION,
+        version: this.version,
+        code: "RATE_LIMITED",
+        message: "Too many actions.",
+      });
       return;
     }
 
     if (message.version !== this.version) {
-      this.sendError(
-        "STALE_VERSION",
-        "The game state moved on.",
-      );
+      this.sendTo(playerId, {
+        type: "ERROR",
+        protocol: PARTY_PROTOCOL_VERSION,
+        version: this.version,
+        code: "STALE_VERSION",
+        message: "The game state moved on.",
+        state: this.game,
+      });
       return;
     }
 
-    const result = applyAction(      {
+    const result = applyAction(
+      {
         state: this.game,
         version: this.version,
-        actorId: "guest",
+        actorId: playerId,
         action: message.action,
         expectedVersion: message.version,
       },
@@ -263,75 +359,227 @@ export class WebRTCHostSession extends GameSession {
     );
 
     if (!result.ok) {
-      this.sendError(result.code, result.message);
+      this.sendTo(playerId, {
+        type: "ERROR",
+        protocol: PARTY_PROTOCOL_VERSION,
+        version: this.version,
+        code: result.code,
+        message: result.message,
+        state: this.game,
+      });
       return;
     }
 
     this.commit(result);
-    this.send({
-      type: "STATE",
-      protocol: PARTY_PROTOCOL_VERSION,
-      version: this.version,
-      state: result.state,
-      events: result.events,
-    });
+    this.broadcastState();
+    this.scheduleBotIfNeeded();
   }
 
-  private handleHello(player: LanPlayerInfo): void {
-    this.peer = player;
+  private handleHello(playerId: string, player: LanPlayerInfo): void {
+    const peer = this.peers.get(playerId);
 
-    if (!this.armed || this.game) {
-      this.notifier.emit(this.snapshot);
+    if (!peer) {
       return;
     }
 
-    this.game = createGame([
-      { id: "host", color: LAN_HOST_ENGINE_COLOR },
-      { id: "guest", color: LAN_GUEST_ENGINE_COLOR },
-    ]);
-    this.version = 0;
-    this.status = "connected";
-    this.error = null;
-    this.events = [];
+    peer.info = { ...player, id: playerId as LanPlayerInfo["id"] };
+    this.refreshLobby();
 
-    this.send({
+    if (this.game) {
+      // A late HELLO after the start: bring the guest up to date.
+      this.sendTo(playerId, {
+        type: "START",
+        protocol: PARTY_PROTOCOL_VERSION,
+        version: this.version,
+        roster: this.roster ?? buildRoster(this.mode, this.lobby),
+        state: this.game,
+      });
+    } else {
+      this.broadcastLobby();
+    }
+
+    this.notifier.emit(this.snapshot);
+  }
+
+  private refreshLobby(): void {
+    if (this.game) {
+      return;
+    }
+
+    const guests = [...this.peers.values()]
+      .map((peer) => peer.info)
+      .filter((info): info is LanPlayerInfo => info !== null)
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    this.lobby = [this.host, ...guests];
+  }
+
+  private handlePeerGone(playerId: string): void {
+    const peer = this.peers.get(playerId);
+
+    if (!peer) {
+      return;
+    }
+
+    this.peers.delete(playerId);
+    peer.unsubscribe();
+    peer.unsubscribeStatus();
+
+    if (this.game && this.game.players.some((item) => item.id === playerId)) {
+      // Mid-match loss: the seat stays, but the host plays for it.
+      if (!this.disconnected.includes(playerId)) {
+        this.disconnected = [...this.disconnected, playerId];
+      }
+      this.scheduleBotIfNeeded();
+    } else {
+      this.refreshLobby();
+      if (!this.game) {
+        this.broadcastLobby();
+      }
+    }
+
+    this.notifier.emit(this.snapshot);
+  }
+
+  private clearBotTimer(): void {
+    if (this.botTimer !== null) {
+      this.cancelSchedule(this.botTimer);
+      this.botTimer = null;
+    }
+  }
+
+  private isAutomated(playerId: string): boolean {
+    return isBotId(playerId) || this.disconnected.includes(playerId);
+  }
+
+  /** Schedules one policy action when the current seat is not a human guest. */
+  private scheduleBotIfNeeded(): void {
+    this.clearBotTimer();
+
+    if (!this.game || this.game.phase === "finished" || this.disposed) {
+      return;
+    }
+
+    const current = this.game.players[this.game.currentPlayerIndex];
+
+    if (!current || !this.isAutomated(current.id)) {
+      return;
+    }
+
+    const playerId = current.id;
+    this.botTimer = this.schedule(() => {
+      this.botTimer = null;
+      this.runBotStep(playerId);
+    }, this.botDelayMs);
+  }
+
+  private runBotStep(playerId: string): void {
+    if (!this.game || this.disposed || this.game.phase === "finished") {
+      return;
+    }
+
+    const current = this.game.players[this.game.currentPlayerIndex];
+
+    if (!current || current.id !== playerId) {
+      this.scheduleBotIfNeeded();
+      return;
+    }
+
+    switch (this.game.phase) {
+      case "awaiting-roll":
+        this.applyAndBroadcast({ type: "ROLL" }, playerId);
+        return;
+      case "awaiting-move": {
+        const move = chooseMove(this.game, playerId);
+        if (move) {
+          this.applyAndBroadcast({ type: "MOVE", move }, playerId);
+        }
+        return;
+      }
+      case "awaiting-bonus": {
+        const move = chooseBonusMove(this.game, playerId);
+        if (move) {
+          this.applyAndBroadcast({ type: "BONUS_MOVE", move }, playerId);
+        }
+        return;
+      }
+      case "awaiting-barrier": {
+        const progress = chooseBarrier(this.game, playerId);
+        if (progress !== null) {
+          this.applyAndBroadcast(
+            { type: "CHOOSE_BARRIER", progress },
+            playerId,
+          );
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  private broadcastLobby(): void {
+    const message: WireMessage = {
+      type: "LOBBY",
+      protocol: PARTY_PROTOCOL_VERSION,
+      mode: this.mode,
+      players: this.lobby,
+    };
+
+    for (const peer of this.peers.values()) {
+      this.sendRaw(peer, message);
+    }
+  }
+
+  private broadcastStart(): void {
+    if (!this.game || !this.roster) {
+      return;
+    }
+
+    const message: WireMessage = {
       type: "START",
       protocol: PARTY_PROTOCOL_VERSION,
       version: this.version,
       roster: this.roster,
       state: this.game,
-    });
+    };
 
-    this.notifier.emit(this.snapshot);
+    for (const peer of this.peers.values()) {
+      this.sendRaw(peer, message);
+    }
   }
 
-  private sendError(code: PartyErrorCode, message: string): void {
+  private broadcastState(): void {
     if (!this.game) {
-      this.send({
-        type: "ERROR",
-        protocol: PARTY_PROTOCOL_VERSION,
-        version: this.version,
-        code,
-        message,
-      });
       return;
     }
 
-    this.send({
-      type: "ERROR",
+    const message: WireMessage = {
+      type: "STATE",
       protocol: PARTY_PROTOCOL_VERSION,
       version: this.version,
-      code,
-      message,
       state: this.game,
-    });
+      events: this.events,
+    };
+
+    for (const peer of this.peers.values()) {
+      this.sendRaw(peer, message);
+    }
   }
 
-  private send(message: WireMessage): void {
+  private sendTo(playerId: string, message: WireMessage): void {
+    const peer = this.peers.get(playerId);
+
+    if (peer) {
+      this.sendRaw(peer, message);
+    }
+  }
+
+  private sendRaw(peer: PeerState, message: WireMessage): void {
     try {
-      this.transport.send(message);
+      peer.transport.send(message);
     } catch {
-      this.setStatus("failed");
+      this.handlePeerGone(peer.playerId);
     }
   }
 }

@@ -6,15 +6,22 @@ import type { GameTransport } from "../transport";
 import { createWebRTCTransport } from "../webrtc/peer-connection";
 import type { DataChannelLike, PeerConnectionLike } from "../webrtc/types";
 import {
-  DEFAULT_GUEST_INFO,
-  DEFAULT_HOST_INFO,
-  createLanRoster,
-} from "@/components/lan/roster";
+  PARTY_PROTOCOL_VERSION,
+  type GameMode,
+  type LanPlayerInfo,
+} from "../protocol";
+import { engineColorOf } from "../seats";
 import { WebRTCHostSession } from "./webrtc-host-session";
 import { WebRTCGuestSession } from "./webrtc-guest-session";
 import type { GameSession } from "../session";
 
-const roster = createLanRoster(DEFAULT_HOST_INFO, DEFAULT_GUEST_INFO);
+const HOST: LanPlayerInfo = { id: "host", name: "Ana", avatar: "/pictures/dog.png" };
+
+const GUESTS: readonly LanPlayerInfo[] = [
+  { id: "guest-1", name: "Bruno", avatar: "/pictures/octupus.png" },
+  { id: "guest-2", name: "Carla", avatar: "/pictures/chicken.png" },
+  { id: "guest-3", name: "Diego", avatar: "/pictures/bee.png" },
+];
 
 /** Seeded dice so a whole match is deterministic. */
 function seededDice(seed = 11) {
@@ -25,38 +32,82 @@ function seededDice(seed = 11) {
   };
 }
 
-interface Pair {
-  readonly host: WebRTCHostSession;
-  readonly guest: WebRTCGuestSession;
-  readonly transport: ReturnType<typeof createMemoryTransportPair>;
+/** A controllable stand-in for `setTimeout` used by the bot scheduler. */
+function createScheduler() {
+  const queue: { run: () => void }[] = [];
+
+  return {
+    schedule(run: () => void): unknown {
+      const handle = { run };
+      queue.push(handle);
+      return handle;
+    },
+    cancel(handle: unknown): void {
+      const index = queue.indexOf(handle as { run: () => void });
+      if (index !== -1) {
+        queue.splice(index, 1);
+      }
+    },
+    /** Runs every pending step, including the ones they schedule. */
+    drain(): void {
+      let guard = 0;
+      while (queue.length > 0 && guard < 10_000) {
+        guard += 1;
+        queue.shift()!.run();
+      }
+    },
+  };
 }
 
-function connectPair(seed = 11): Pair {
-  const transport = createMemoryTransportPair();
+interface Room {
+  readonly host: WebRTCHostSession;
+  readonly guests: readonly WebRTCGuestSession[];
+  readonly scheduler: ReturnType<typeof createScheduler>;
+  /** Guest transports, indexed by seat. */
+  readonly pairs: readonly ReturnType<typeof createMemoryTransportPair>[];
+}
+
+/**
+ * Builds a host and one direct transport per guest, mirroring the production
+ * star topology: each guest only talks to the host.
+ */
+function openRoom(mode: GameMode, guestCount: number, seed = 11): Room {
+  const scheduler = createScheduler();
   const host = new WebRTCHostSession({
-    transport: transport.host,
-    roster,
+    host: HOST,
+    mode,
     rollDice: seededDice(seed),
-    // A synchronous test loop acts far faster than a human; the production
-    // limit is exercised in its own test below.
+    botDelayMs: 0,
+    schedule: (run) => scheduler.schedule(run),
+    cancelSchedule: (handle) => scheduler.cancel(handle),
+    // A synchronous test loop acts far faster than a human.
     rateLimit: { limit: 100_000, windowMs: 1000 },
   });
-  const guest = new WebRTCGuestSession({
-    transport: transport.guest,
-    player: DEFAULT_GUEST_INFO,
-  });
 
-  host.start();
-  guest.connect();
-  return { host, guest, transport };
+  const pairs = [];
+  const guests = [];
+
+  for (let index = 0; index < guestCount; index += 1) {
+    const pair = createMemoryTransportPair();
+    const info = GUESTS[index]!;
+    pairs.push(pair);
+    host.joinPeer({ playerId: info.id, transport: pair.host });
+
+    const guest = new WebRTCGuestSession({
+      transport: pair.guest,
+      playerId: info.id,
+      player: info,
+    });
+    guests.push(guest);
+    guest.connect();
+  }
+
+  return { host, guests, scheduler, pairs };
 }
 
-/** Plays the current player's turn on whichever side owns it. */
-function playOneStep(
-  host: WebRTCHostSession,
-  guest: WebRTCGuestSession,
-): boolean {
-  const state = host.snapshot.state;
+/** Plays the current player's turn on whichever seat owns it. */
+function playOneStep(room: Room): boolean {
+  const state = room.host.snapshot.state;
   if (!state || state.phase === "finished") {
     return false;
   }
@@ -66,7 +117,22 @@ function playOneStep(
     return false;
   }
 
-  const session: GameSession = current.id === "host" ? host : guest;
+  const byId = new Map<string, GameSession>(
+    room.guests
+      .filter((guest) => !room.host.snapshot.disconnected.includes(guest.playerId))
+      .map((guest) => [guest.playerId, guest] as const),
+  );
+  const session = current.id === "host" ? room.host : byId.get(current.id);
+
+  if (!session) {
+    // A seat the host plays for (a bot or a dropped guest).
+    room.scheduler.drain();
+    const next = room.host.snapshot.state;
+    if (!next || next.players[next.currentPlayerIndex]?.id === current.id) {
+      return false;
+    }
+    return true;
+  }
 
   switch (state.phase) {
     case "awaiting-roll":
@@ -92,116 +158,164 @@ function playOneStep(
   return true;
 }
 
-function playToEnd(host: WebRTCHostSession, guest: WebRTCGuestSession) {
+function playToEnd(room: Room): number {
   let steps = 0;
 
-  while (playOneStep(host, guest) && steps < 5000) {
+  while (playOneStep(room) && steps < 20_000) {
     steps += 1;
   }
 
-  expect(steps).toBeLessThan(5000);
+  expect(steps).toBeLessThan(20_000);
   return steps;
 }
 
-describe("WEBRTC sessions", () => {
-  test("host starts the match on HELLO and both sides agree", () => {
-    const { host, guest } = connectPair();
-    const guestSnapshot = guest.snapshot;
+describe("party sessions", () => {
+  test("the lobby lists the host and each guest that says hello", () => {
+    const room = openRoom("all", 2);
 
-    expect(host.snapshot.status).toBe("connected");
-    expect(host.snapshot.state).not.toBeNull();
-    expect(guestSnapshot.state).not.toBeNull();
-    expect(guestSnapshot.roster).toEqual(roster);
-    expect(guestSnapshot.version).toBe(host.snapshot.version);
-    expect(guestSnapshot.state?.players.map((player) => player.color)).toEqual([
+    expect(room.host.snapshot.state).toBeNull();
+    expect(room.host.snapshot.lobby.map((player) => player.id)).toEqual([
+      "host",
+      "guest-1",
+      "guest-2",
+    ]);
+    // A guest can see the other humans in the lobby in real time.
+    expect(
+      room.guests[1]!.snapshot.lobby.map((player) => player.id),
+    ).toEqual(["host", "guest-1", "guest-2"]);
+  });
+
+  test("only the host starts; the roster fills empty seats with bots", () => {
+    const room = openRoom("all", 1);
+
+    expect(() => room.guests[0]!.start()).toThrow();
+    expect(room.host.snapshot.state).toBeNull();
+
+    room.host.start();
+
+    const roster = room.guests[0]!.snapshot.roster!;
+    expect(roster.players.map((player) => player.id)).toEqual([
+      "host",
+      "guest-1",
+      "bot-blue",
+      "bot-green",
+    ]);
+    expect(roster.players.map((player) => engineColorOf(player.id))).toEqual([
       "yellow",
       "green",
+      "blue",
+      "red",
     ]);
-    // Board red/yellow maps to those engine colours.
-    expect(guestSnapshot.state?.players.map((player) => player.id)).toEqual([
-      "host",
-      "guest",
-    ]);
+    expect(room.guests[0]!.snapshot.mode).toBe("all");
   });
 
-  test("plays a full match to a win with identical state on both sides", () => {
-    const { host, guest } = connectPair();
-    playToEnd(host, guest);
+  test("a 1v1 room seats two players with no bots left over", () => {
+    const room = openRoom("1v1", 1);
+    room.host.start();
 
-    const hostSnapshot = host.snapshot;
-    const guestSnapshot = guest.snapshot;
-
-    expect(hostSnapshot.state?.phase).toBe("finished");
-    expect(hostSnapshot.state?.winnerId).toBeTruthy();
-    expect(guestSnapshot.state).toEqual(hostSnapshot.state!);
-    expect(guestSnapshot.version).toBe(hostSnapshot.version);
-    expect(guestSnapshot.state?.log).toEqual(hostSnapshot.state?.log);
+    expect(
+      room.guests[0]!.snapshot.roster?.players.map((player) => player.id),
+    ).toEqual(["host", "guest-1"]);
+    expect(room.host.snapshot.mode).toBe("1v1");
+    expect(room.guests[0]!.snapshot.state?.players).toHaveLength(2);
+    // Host and guest take opposite corners: board red and green, not yellow.
+    expect(
+      room.guests[0]!.snapshot.roster?.players.map((player) =>
+        engineColorOf(player.id, "1v1"),
+      ),
+    ).toEqual(["yellow", "red"]);
   });
 
-  test("the guest never rolls dice and cannot start", () => {
-    const { host, guest } = connectPair();
-    expect(() => guest.start()).toThrow();
+  test("a four-human match plays to a win with identical state everywhere", () => {
+    const room = openRoom("all", 3);
+    room.host.start();
 
-    const before = host.snapshot.state!;
-    expect(before.phase).toBe("awaiting-roll");
-    // Host moves first, so a guest ROLL is rejected without touching state.
-    guest.roll();
-    expect(host.snapshot.state).toBe(before);
-    expect(host.snapshot.version).toBe(0);
-    expect(guest.snapshot.error?.code).toBe("NOT_YOUR_TURN");
-    expect(guest.snapshot.state).toEqual(before);
-  });
+    playToEnd(room);
 
-  test("a stale guest version is rejected without touching the host state", () => {
-    const { host, guest, transport } = connectPair();
-    let state = host.snapshot.state!;
+    const finished = room.host.snapshot.state!;
+    expect(finished.phase).toBe("finished");
+    expect(finished.winnerId).toBeTruthy();
 
-    // Get the turn to the guest so only the version can be wrong.
-    while (state.players[state.currentPlayerIndex]!.id !== "guest") {
-      host.roll();
-      state = host.snapshot.state!;
-      if (state.phase === "awaiting-move") {
-        host.move(getLegalMoves(state)[0]!);
-        state = host.snapshot.state!;
-      }
+    for (const guest of room.guests) {
+      expect(guest.snapshot.state).toEqual(finished);
+      expect(guest.snapshot.version).toBe(room.host.snapshot.version);
     }
+  });
 
-    const before = host.snapshot.state!;
-    const version = host.snapshot.version;
+  test("an empty seat is played by the host until the match ends", () => {
+    const room = openRoom("1v1", 0);
+    room.host.start();
 
-    // Bypass the guest session to forge a stale action on the wire.
-    transport.guest.send({
+    // A 1v1 seat on the opposite corner, so an empty guest seat is the green bot.
+    expect(
+      room.host.snapshot.roster?.players.map((player) => player.id),
+    ).toEqual(["host", "bot-green"]);
+
+    playToEnd(room);
+    expect(room.host.snapshot.state?.phase).toBe("finished");
+  });
+
+  test("the guest cannot roll out of turn", () => {
+    const room = openRoom("1v1", 1);
+    room.host.start();
+
+    const hostState = room.host.snapshot.state!;
+    expect(hostState.players[hostState.currentPlayerIndex]?.id).toBe("host");
+
+    room.guests[0]!.roll();
+
+    expect(room.host.snapshot.state).toBe(hostState);
+    expect(room.host.snapshot.version).toBe(0);
+    expect(room.guests[0]!.snapshot.error?.code).toBe("NOT_YOUR_TURN");
+  });
+
+  test("a stale version is rejected without touching the host state", () => {
+    const room = openRoom("1v1", 1);
+    room.host.start();
+
+    // Move the state on so the guest's forged version is a valid, older one.
+    room.host.roll();
+    const before = room.host.snapshot.state!;
+    const version = room.host.snapshot.version;
+    expect(version).toBeGreaterThan(0);
+
+    room.pairs[0]!.guest.send({
       type: "ACTION",
-      protocol: 1,
+      protocol: PARTY_PROTOCOL_VERSION,
       version: version - 1,
       action: { type: "ROLL" },
       requestId: "stale-1",
     });
 
-    expect(host.snapshot.state).toBe(before);
-    expect(host.snapshot.version).toBe(version);
-    expect(guest.snapshot.error?.code).toBe("STALE_VERSION");
+    expect(room.host.snapshot.state).toBe(before);
+    expect(room.host.snapshot.version).toBe(version);
+    expect(room.guests[0]!.snapshot.error?.code).toBe("STALE_VERSION");
   });
 
   test("rate limiting rejects a burst of guest actions", () => {
-    const transport = createMemoryTransportPair();
+    const pair = createMemoryTransportPair();
     const host = new WebRTCHostSession({
-      transport: transport.host,
-      roster,
+      host: HOST,
+      mode: "1v1",
       rollDice: seededDice(),
       rateLimit: { limit: 3, windowMs: 60_000 },
       now: () => 1000,
+      schedule: () => null,
+      cancelSchedule: () => {},
     });
+    host.joinPeer({ playerId: "guest-1", transport: pair.host });
+
     const guest = new WebRTCGuestSession({
-      transport: transport.guest,
-      player: DEFAULT_GUEST_INFO,
+      transport: pair.guest,
+      playerId: "guest-1",
+      player: GUESTS[0]!,
     });
-    host.start();
     guest.connect();
+    host.start();
 
     // Drive the turn to the guest, then burst more actions than the limit.
     let state = host.snapshot.state!;
-    while (state.players[state.currentPlayerIndex]!.id !== "guest") {
+    while (state.players[state.currentPlayerIndex]!.id !== "guest-1") {
       host.roll();
       state = host.snapshot.state!;
       if (state.phase === "awaiting-move") {
@@ -217,29 +331,42 @@ describe("WEBRTC sessions", () => {
     expect(guest.snapshot.error?.code).toBe("RATE_LIMITED");
   });
 
-  test("disconnecting the transport leaves both sessions terminal", () => {
-    const { host, guest, transport } = connectPair();
-    transport.disconnect();
+  test("a guest leaving the lobby removes it without ending the room", () => {
+    const room = openRoom("all", 2);
+    const pair = room.pairs[1]!;
 
-    expect(host.snapshot.status).toBe("failed");
-    expect(guest.snapshot.status).toBe("failed");
+    // Dropping the channel makes the host free the seat.
+    pair.disconnect();
+
+    expect(room.host.snapshot.lobby.map((player) => player.id)).toEqual([
+      "host",
+      "guest-1",
+    ]);
+    expect(room.host.snapshot.state).toBeNull();
   });
 
-  test("disposing the host fails the guest", () => {
-    const { host, guest } = connectPair();
-    host.dispose();
+  test("a guest dropping mid-match leaves its seat to the host", () => {
+    const room = openRoom("1v1", 1);
+    room.host.start();
 
-    expect(host.snapshot.status).toBe("closed");
-    expect(guest.snapshot.status).toBe("disconnected");
+    room.pairs[0]!.disconnect();
+
+    expect(room.host.snapshot.disconnected).toEqual(["guest-1"]);
+    expect(room.host.snapshot.state).not.toBeNull();
+    // The host finishes the match for the dropped seat.
+    playToEnd(room);
+    expect(room.host.snapshot.state?.phase).toBe("finished");
   });
 
-  test("start before a guest arrives leaves the host connected with no game", () => {
-    const transport = createMemoryTransportPair();
-    const host = new WebRTCHostSession({ transport: transport.host, roster });
-    host.start();
+  test("disposing the host disconnects every guest", () => {
+    const room = openRoom("all", 2);
+    room.host.start();
+    room.host.dispose();
 
-    expect(host.snapshot.status).toBe("connected");
-    expect(host.snapshot.state).toBeNull();
+    expect(room.host.snapshot.status).toBe("closed");
+    for (const guest of room.guests) {
+      expect(guest.snapshot.status).toBe("disconnected");
+    }
   });
 });
 
@@ -252,8 +379,6 @@ interface FakePair {
 
 /** Two WebRTC transports wired to each other with no network in between. */
 function createFakeWebRTCPair(): FakePair {
-  // The structural interfaces declare `readyState` readonly; the fake needs to
-  // mutate it, so it keeps its own mutable view of the same object.
   const makeChannel = () => {
     const channel = {
       label: "parchis-v1",
@@ -294,7 +419,6 @@ function createFakeWebRTCPair(): FakePair {
   const hostChannel = makeChannel();
   const guestChannel = makeChannel();
 
-  // Wire each channel's send into the other's message handler.
   hostChannel.send = (data: string) => guestChannel.onmessage?.({ data });
   guestChannel.send = (data: string) => hostChannel.onmessage?.({ data });
 
@@ -324,20 +448,27 @@ describe("transport independence", () => {
     open: () => void = () => {},
   ) {
     const host = new WebRTCHostSession({
-      transport: hostTransport,
-      roster,
+      host: HOST,
+      mode: "1v1",
       rollDice: seededDice(5),
       rateLimit: { limit: 100_000, windowMs: 1000 },
+      schedule: () => null,
+      cancelSchedule: () => {},
     });
+    host.joinPeer({ playerId: "guest-1", transport: hostTransport });
+
     const guest = new WebRTCGuestSession({
       transport: guestTransport,
-      player: DEFAULT_GUEST_INFO,
+      playerId: "guest-1",
+      player: GUESTS[0]!,
     });
 
-    host.start();
-    guest.connect();
     open();
-    playToEnd(host, guest);
+    guest.connect();
+    host.start();
+
+    const room: Room = { host, guests: [guest], scheduler: createScheduler(), pairs: [] };
+    playToEnd(room);
 
     return {
       host: host.snapshot.state,

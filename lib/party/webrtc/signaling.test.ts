@@ -3,15 +3,8 @@ import {
   acceptHostAnswer,
   acceptHostOffer,
   createHostOffer,
-  decodePairing,
-  encodePairing,
-  joinPairingParts,
   mapConnectionState,
-  measurePairing,
-  PAIRING_PREFIX,
-  QR_PART_MAX_CHARS,
   selectIceServers,
-  splitPairing,
   waitForIceGathering,
   type PairingTimers,
 } from "./signaling";
@@ -27,7 +20,6 @@ const SDP = [
   "s=-",
   "t=0 0",
   "a=candidate:0 1 udp 2122260223 192.168.1.20 51234 typ host generation 0",
-  "a=candidate:1 1 udp 2122260223 192.168.1.21 51235 typ host generation 0",
   "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
 ].join("\r\n");
 
@@ -47,7 +39,6 @@ function fakeChannel(): DataChannelLike {
 
 interface FakeOptions {
   gather?: "complete" | "timeout" | "event" | "end-of-candidates";
-  timeoutMs?: number;
 }
 
 function fakePeer(options: FakeOptions = {}): PeerConnectionLike {
@@ -108,96 +99,6 @@ function manualTimers() {
     fire: () => callbacks.forEach((callback) => callback()),
   };
 }
-
-describe("pairing codes", () => {
-  test("round-trips an offer", () => {
-    const encoded = encodePairing({ id: "abc123", kind: "offer", sdp: SDP });
-    expect(encoded.startsWith(`${PAIRING_PREFIX}:`)).toBeTrue();
-    expect(decodePairing(encoded)).toEqual({
-      ok: true,
-      description: { id: "abc123", kind: "offer", sdp: SDP },
-    });
-  });
-
-  test("rejects a foreign prefix, corruption, and oversized payloads", () => {
-    expect(decodePairing("SOMETHING-ELSE:abc")).toMatchObject({
-      ok: false,
-      reason: "bad-prefix",
-    });
-    expect(decodePairing(`${PAIRING_PREFIX}:!!!!`)).toMatchObject({
-      ok: false,
-      reason: "bad-payload",
-    });
-    expect(
-      decodePairing(`${PAIRING_PREFIX}:${"A".repeat(33 * 1024)}`),
-    ).toMatchObject({ ok: false, reason: "too-large" });
-  });
-
-  test("splits a long code into parts of at most 300 characters and reassembles", () => {
-    const longSdp = `${SDP}\r\n${"a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n".repeat(20)}`;
-    const encoded = encodePairing({ id: "hostid12", kind: "offer", sdp: longSdp });
-    const parts = splitPairing(encoded);
-
-    expect(parts.length).toBeGreaterThan(1);
-    for (const part of parts) {
-      expect(part.text.length).toBeLessThanOrEqual(QR_PART_MAX_CHARS);
-    }
-
-    const joined = joinPairingParts(parts.map((part) => part.text));
-    expect(joined).toMatchObject({ status: "complete" });
-    if (joined.status === "complete") {
-      expect(joined.text).toBe(encoded);
-      expect(decodePairing(joined.text)).toMatchObject({ ok: true });
-    }
-  });
-
-  test("tolerates out-of-order and duplicate parts", () => {
-    const encoded = encodePairing({ id: "hostid12", kind: "offer", sdp: SDP.repeat(20) });
-    const parts = splitPairing(encoded).map((part) => part.text);
-    const shuffled = [parts[0]!, parts[0]!, ...parts.slice(1).reverse()];
-
-    expect(joinPairingParts(shuffled)).toMatchObject({ status: "complete" });
-  });
-
-  test("reports missing parts and mixed pairing ids", () => {
-    const first = splitPairing(
-      encodePairing({ id: "aaaa1111", kind: "offer", sdp: SDP.repeat(20) }),
-    ).map((part) => part.text);
-    const second = splitPairing(
-      encodePairing({ id: "bbbb2222", kind: "offer", sdp: SDP.repeat(20) }),
-    ).map((part) => part.text);
-
-    const one = joinPairingParts([first[0]!]);
-    expect(one).toMatchObject({ status: "incomplete", total: first.length });
-    if (one.status === "incomplete") {
-      expect(one.missing).toContain(2);
-    }
-
-    expect(joinPairingParts([first[0]!, second[1]!])).toEqual({
-      status: "conflict",
-      reason: "mixed-ids",
-    });
-  });
-
-  test("detects a tampered chunk via the checksum", () => {
-    const encoded = encodePairing({ id: "hostid12", kind: "offer", sdp: SDP });
-    const parts = splitPairing(encoded).map((part) => part.text);
-    const tampered = parts.map((text, index) =>
-      index === 0 ? text.replace(/.$/, "X") : text,
-    );
-
-    expect(joinPairingParts(tampered)).toEqual({
-      status: "conflict",
-      reason: "checksum",
-    });
-  });
-
-  test("measures a real-shaped description within QR limits", () => {
-    const measured = measurePairing({ id: "abcdefgh", kind: "offer", sdp: SDP });
-    expect(measured.parts).toBeGreaterThanOrEqual(1);
-    expect(measured.maxPartChars).toBeLessThanOrEqual(QR_PART_MAX_CHARS);
-  });
-});
 
 describe("ICE gathering", () => {
   test("resolves immediately when gathering is already complete", async () => {
@@ -263,7 +164,7 @@ describe("negotiation order", () => {
     expect(result.channel).toBe(channel);
   });
 
-  test("guest answers a decoded offer and ignores a duplicate answer", async () => {
+  test("guest answers an offer and ignores a duplicate answer", async () => {
     const pc = fakePeer({ gather: "complete" });
     const result = await acceptHostOffer(
       { id: "hostid12", kind: "offer", sdp: SDP },

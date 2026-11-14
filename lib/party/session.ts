@@ -1,5 +1,6 @@
 import type { BonusMove, GameEvent, GameState, Move } from "@/lib/parchis/types";
 import type {
+  GameMode,
   LanPlayerInfo,
   LanRoster,
   PartyErrorCode,
@@ -26,8 +27,13 @@ export interface SessionSnapshot {
   /** Events appended by the update that produced this snapshot. */
   readonly events: readonly GameEvent[];
   readonly error: SessionError | null;
-  readonly peer: LanPlayerInfo | null;
+  /** Seats in the lobby before the match: host first, connected guests next. */
+  readonly lobby: readonly LanPlayerInfo[];
+  /** Full roster once the match starts, bots included; null before that. */
   readonly roster: LanRoster | null;
+  /** Seats whose connection dropped mid-match (their turn is played by a bot). */
+  readonly disconnected: readonly string[];
+  readonly mode: GameMode;
 }
 
 export type SessionListener = (snapshot: SessionSnapshot) => void;
@@ -37,11 +43,11 @@ export type SessionListener = (snapshot: SessionSnapshot) => void;
  * added later without changing any caller.
  */
 export abstract class GameSession {
-  abstract readonly playerId: "host" | "guest";
+  abstract readonly playerId: string;
   abstract readonly transportKind: TransportKind;
   abstract get snapshot(): SessionSnapshot;
 
-  /** Begins the match. Hosts arm the roster; guests cannot start. */
+  /** Begins the match. Only the host implements it; guests throw. */
   abstract start(): void;
   abstract roll(): void;
   abstract move(move: Move): void;

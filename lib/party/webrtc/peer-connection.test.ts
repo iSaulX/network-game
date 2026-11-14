@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { createWebRTCTransport } from "./peer-connection";
 import type { DataChannelLike, PeerConnectionLike } from "./types";
-import type { WireMessage } from "../protocol";
+import { PARTY_PROTOCOL_VERSION, type WireMessage } from "../protocol";
 
 const HELLO: WireMessage = {
   type: "HELLO",
-  protocol: 1,
-  role: "guest",
-  player: { id: "guest", name: "Bruno", avatar: "/pictures/dog.png" },
+  protocol: PARTY_PROTOCOL_VERSION,
+  player: { id: "guest-1", name: "Bruno", avatar: "/pictures/dog.png" },
 };
 
 function fakeChannel(readyState: DataChannelLike["readyState"] = "connecting") {

@@ -25,8 +25,8 @@ export default function OfflinePage() {
           No hay conexión a internet.
         </p>
         <p className="mt-1 text-sm leading-6 text-stone-500">
-          Puedes seguir jugando contra los bots sin conexión. Jugar con amigos
-          en la misma red Wi‑Fi tampoco necesita internet.
+          Puedes seguir jugando contra los bots sin conexión. Para jugar en
+          línea hace falta internet para encontrar a las demás personas.
         </p>
 
         <div className="mt-6 flex flex-col gap-3">
@@ -40,7 +40,7 @@ export default function OfflinePage() {
           </DrawablyButton>
 
           {/* Offline local mode entry point (the game itself runs in PixiJS). */}
-          <form action="/alone" method="get">
+          <form action="/" method="get">
             <DrawablyButton
               type="submit"
               variant="outline"
@@ -50,21 +50,11 @@ export default function OfflinePage() {
               Jugar sin conexión
             </DrawablyButton>
           </form>
-
-          <form action="/lan" method="get">
-            <DrawablyButton
-              type="submit"
-              variant="outline"
-              stroke="var(--parchis-blue)"
-              className="w-full select-none px-6 py-2.5"
-            >
-              Jugar en la misma red
-            </DrawablyButton>
-          </form>
         </div>
 
         <p className="mt-5 text-xs leading-5 text-stone-500">
-          El modo en red solo funciona entre dispositivos de la misma red Wi‑Fi.
+          El modo en línea conecta los dispositivos directamente, pero primero
+          necesita internet para el emparejamiento.
         </p>
       </DrawablyCard>
     </main>

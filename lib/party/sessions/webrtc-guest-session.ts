@@ -3,6 +3,7 @@ import { GameSessionError } from "../errors";
 import {
   PARTY_PROTOCOL_VERSION,
   type ClientAction,
+  type GameMode,
   type LanPlayerInfo,
   type LanRoster,
   type WireMessage,
@@ -16,6 +17,9 @@ import type { GameTransport, TransportKind } from "../transport";
 
 export interface GuestSessionOptions {
   readonly transport: GameTransport;
+  /** The seat the server assigned, e.g. `"guest-1"`. */
+  readonly playerId: string;
+  /** This client's display name and avatar. */
   readonly player: LanPlayerInfo;
   /** Injected in tests; defaults to `crypto.randomUUID`. */
   readonly newRequestId?: () => string;
@@ -23,10 +27,11 @@ export interface GuestSessionOptions {
 
 /**
  * The non-authoritative peer. It never rolls dice or holds the truth: it sends
- * intents with its last seen version and adopts host snapshots.
+ * intents with its last seen version and adopts host snapshots. It stays in the
+ * lobby until the host starts the match.
  */
 export class WebRTCGuestSession extends GameSession {
-  readonly playerId = "guest" as const;
+  readonly playerId: string;
   readonly transportKind: TransportKind;
 
   private readonly transport: GameTransport;
@@ -34,20 +39,25 @@ export class WebRTCGuestSession extends GameSession {
   private readonly newRequestId: () => string;
   private readonly notifier = new SessionNotifier();
   private readonly unsubscribe: () => void;
+  private readonly unsubscribeStatus: () => void;
 
   private game: GameState | null = null;
   private version = 0;
-  private status: SessionSnapshot["status"] = "connecting";
+  private status: SessionSnapshot["status"] = "idle";
   private error: SessionSnapshot["error"] = null;
+  private lobby: readonly LanPlayerInfo[] = [];
   private roster: LanRoster | null = null;
-  private events: readonly GameEvent[] = [];
+  private mode: GameMode = "1v1";
+  private disconnected: readonly string[] = [];
+  private eventsValue: readonly GameEvent[] = [];
   private connected = false;
   private disposed = false;
 
   constructor(options: GuestSessionOptions) {
     super();
     this.transport = options.transport;
-    this.player = options.player;
+    this.playerId = options.playerId;
+    this.player = { ...options.player, id: options.playerId as LanPlayerInfo["id"] };
     this.transportKind = options.transport.kind;
     this.newRequestId =
       options.newRequestId ??
@@ -64,11 +74,12 @@ export class WebRTCGuestSession extends GameSession {
       this.receive(message);
     });
 
-    this.transport.subscribeStatus((next) => {
+    this.unsubscribeStatus = this.transport.subscribeStatus((next) => {
       if (next === "open") {
         this.connected = true;
-        this.setStatus("connected");
+        this.status = "connected";
         this.sayHello();
+        this.notifier.emit(this.snapshot);
       } else if (next === "failed") {
         this.setStatus("failed");
       } else if (next === "closed") {
@@ -89,10 +100,12 @@ export class WebRTCGuestSession extends GameSession {
       state: this.game,
       version: this.version,
       status: this.status,
-      events: this.events,
+      events: this.eventsValue,
       error: this.error,
-      peer: null,
+      lobby: this.lobby,
       roster: this.roster,
+      disconnected: this.disconnected,
+      mode: this.mode,
     };
   }
 
@@ -133,9 +146,10 @@ export class WebRTCGuestSession extends GameSession {
     }
     this.disposed = true;
     this.unsubscribe();
+    this.unsubscribeStatus();
     this.notifier.clear();
     this.transport.close();
-    this.setStatus("closed");
+    this.status = "closed";
   }
 
   private setStatus(next: SessionSnapshot["status"]): void {
@@ -155,7 +169,6 @@ export class WebRTCGuestSession extends GameSession {
       this.transport.send({
         type: "HELLO",
         protocol: PARTY_PROTOCOL_VERSION,
-        role: "guest",
         player: this.player,
       });
     } catch {
@@ -164,7 +177,7 @@ export class WebRTCGuestSession extends GameSession {
   }
 
   private act(action: ClientAction): void {
-    if (!this.game || this.status !== "connected") {
+    if (!this.game || this.status !== "connected" || this.disposed) {
       return;
     }
 
@@ -187,13 +200,23 @@ export class WebRTCGuestSession extends GameSession {
     }
 
     switch (message.type) {
+      case "LOBBY":
+        this.mode = message.mode;
+        this.lobby = message.players;
+        this.status = "connected";
+        this.notifier.emit(this.snapshot);
+        return;
       case "START":
+        this.mode = message.roster.players.length === 2 ? "1v1" : "all";
         this.roster = message.roster;
         this.game = message.state;
         this.version = message.version;
+        this.lobby = message.roster.players.filter(
+          (item) => !item.id.startsWith("bot-"),
+        );
         this.status = "connected";
         this.error = null;
-        this.events = [];
+        this.eventsValue = [];
         this.notifier.emit(this.snapshot);
         return;
       case "STATE":
@@ -206,7 +229,7 @@ export class WebRTCGuestSession extends GameSession {
         this.version = message.version;
         this.status = "connected";
         this.error = null;
-        this.events = message.events;
+        this.eventsValue = message.events;
         this.notifier.emit(this.snapshot);
         return;
       case "ERROR":

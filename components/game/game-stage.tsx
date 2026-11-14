@@ -438,6 +438,7 @@ export function GameStage({
         active={active}
         human={human}
         controllable={human && humanControlled}
+        auto={human && Boolean(autoControl?.checked)}
         rolling={isRolling}
         rollingFaces={isRolling ? (rolling?.faces ?? null) : null}
         onRoll={onRoll}

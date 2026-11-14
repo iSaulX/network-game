@@ -1,13 +1,16 @@
 /**
- * Wire types for the LAN 1v1 session.
+ * Wire types for online party sessions.
  *
  * Everything here is framework-free and browser-safe: the same messages travel
  * over the WebRTC data channel in the app and over an in-memory pair in tests.
- * The host is authoritative; the guest only sends intents, never die values.
+ * The host is authoritative; guests only send intents, never die values.
+ *
+ * A room has one host and up to three guests. The host talks to every guest
+ * over its own data channel (star topology); guests never talk to each other.
  */
 import type { BonusMove, GameEvent, GameState, Move } from "@/lib/parchis/types";
 
-export const PARTY_PROTOCOL_VERSION = 1 as const;
+export const PARTY_PROTOCOL_VERSION = 2 as const;
 
 /** Hard cap for one data-channel message. State snapshots are far smaller. */
 export const MAX_WIRE_CHARS = 64 * 1024;
@@ -15,11 +18,27 @@ export const MAX_WIRE_CHARS = 64 * 1024;
 /** Reliable, ordered data channel created by the host before the offer. */
 export const DATA_CHANNEL_LABEL = "parchis-v1";
 
-/** Fixed LAN roles. The host plays board red, the guest board yellow. */
-export type LanRole = "host" | "guest";
+export type PartyRole = "host" | "guest";
+
+/** `1v1` seats two players; `all` seats four. */
+export type GameMode = "1v1" | "all";
+
+/** Stable ids: one host, up to three guests, and bots by board colour. */
+export const HOST_ID = "host" as const;
+export const GUEST_IDS = ["guest-1", "guest-2", "guest-3"] as const;
+export const BOT_IDS = [
+  "bot-red",
+  "bot-yellow",
+  "bot-blue",
+  "bot-green",
+] as const;
+
+export type GuestId = (typeof GUEST_IDS)[number];
+export type BotId = (typeof BOT_IDS)[number];
+export type PlayerId = typeof HOST_ID | GuestId | BotId;
 
 export interface LanPlayerInfo {
-  readonly id: LanRole;
+  readonly id: PlayerId;
   /** Display name, trimmed and capped at 24 characters. */
   readonly name: string;
   /** One of the allowlisted `/pictures/*.png` avatars. */
@@ -27,8 +46,7 @@ export interface LanPlayerInfo {
 }
 
 export interface LanRoster {
-  readonly host: LanPlayerInfo;
-  readonly guest: LanPlayerInfo;
+  readonly players: readonly LanPlayerInfo[];
 }
 
 export type ClientAction =
@@ -54,7 +72,6 @@ export type GuestToHostMessage =
   | {
       readonly type: "HELLO";
       readonly protocol: number;
-      readonly role: "guest";
       readonly player: LanPlayerInfo;
     }
   | {
@@ -66,6 +83,13 @@ export type GuestToHostMessage =
     };
 
 export type HostToGuestMessage =
+  | {
+      readonly type: "LOBBY";
+      readonly protocol: number;
+      readonly mode: GameMode;
+      /** Connected humans, host first; empty seats are not listed. */
+      readonly players: readonly LanPlayerInfo[];
+    }
   | {
       readonly type: "START";
       readonly protocol: number;
@@ -100,8 +124,8 @@ export type DecodeResult =
   | { readonly ok: true; readonly message: WireMessage }
   | { readonly ok: false; readonly code: PartyErrorCode; readonly message: string };
 
-const HOST_MESSAGE_TYPES = new Set(["START", "STATE", "ERROR", "BYE"]);
 const GUEST_MESSAGE_TYPES = new Set(["HELLO", "ACTION"]);
+const HOST_MESSAGE_TYPES = new Set(["LOBBY", "START", "STATE", "ERROR", "BYE"]);
 const ERROR_CODES = new Set<string>([
   "PROTOCOL_MISMATCH",
   "BAD_MESSAGE",
@@ -116,6 +140,10 @@ const ERROR_CODES = new Set<string>([
   "NOT_READY",
 ]);
 
+const PLAYER_ID_PATTERN =
+  /^(?:host|guest-[1-3]|bot-(?:red|blue|yellow|green))$/;
+const GUEST_ID_PATTERN = /^guest-[1-3]$/;
+
 /** Avatar values are always local asset paths, never peer-supplied URLs. */
 export function isAllowedAvatar(value: string): boolean {
   return /^\/pictures\/[a-z]+\.png$/.test(value);
@@ -123,6 +151,35 @@ export function isAllowedAvatar(value: string): boolean {
 
 export function sanitizePlayerName(value: string): string {
   return value.trim().slice(0, 24);
+}
+
+export function isPlayerId(value: unknown): value is PlayerId {
+  return typeof value === "string" && PLAYER_ID_PATTERN.test(value);
+}
+
+export function isGuestId(value: unknown): value is GuestId {
+  return typeof value === "string" && GUEST_ID_PATTERN.test(value);
+}
+
+export function isGameMode(value: unknown): value is GameMode {
+  return value === "1v1" || value === "all";
+}
+
+/** Board colour each seat plays. Host is red, guests follow the colour order. */
+export const SEAT_BOARD_COLOR: Readonly<Record<PlayerId, string>> =
+  Object.freeze({
+    host: "red",
+    "guest-1": "yellow",
+    "guest-2": "blue",
+    "guest-3": "green",
+    "bot-red": "red",
+    "bot-yellow": "yellow",
+    "bot-blue": "blue",
+    "bot-green": "green",
+  });
+
+export function isBotId(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith("bot-");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -197,7 +254,7 @@ function isClientAction(value: unknown): value is ClientAction {
 function isLanPlayerInfo(value: unknown): value is LanPlayerInfo {
   return (
     isRecord(value) &&
-    (value.id === "host" || value.id === "guest") &&
+    isPlayerId(value.id) &&
     typeof value.name === "string" &&
     value.name.length > 0 &&
     value.name.length <= 24 &&
@@ -206,13 +263,38 @@ function isLanPlayerInfo(value: unknown): value is LanPlayerInfo {
   );
 }
 
-function isRoster(value: unknown): value is LanRoster {
+function isHumanSeat(value: unknown): value is LanPlayerInfo {
   return (
-    isRecord(value) &&
-    isLanPlayerInfo(value.host) &&
-    isLanPlayerInfo(value.guest) &&
-    value.host.id === "host" &&
-    value.guest.id === "guest"
+    isLanPlayerInfo(value) && (value.id === "host" || isGuestId(value.id))
+  );
+}
+
+function hasUniqueIds(players: readonly LanPlayerInfo[]): boolean {
+  return new Set(players.map((player) => player.id)).size === players.length;
+}
+
+function isLobbyPlayers(value: unknown): value is readonly LanPlayerInfo[] {
+  return (
+    Array.isArray(value) &&
+    value.length >= 1 &&
+    value.length <= 4 &&
+    value.every(isHumanSeat) &&
+    hasUniqueIds(value as LanPlayerInfo[])
+  );
+}
+
+function isRoster(value: unknown): value is LanRoster {
+  if (!isRecord(value) || !Array.isArray(value.players)) {
+    return false;
+  }
+
+  const players = value.players as unknown[];
+
+  return (
+    (players.length === 2 || players.length === 4) &&
+    players.every(isLanPlayerInfo) &&
+    hasUniqueIds(players as LanPlayerInfo[]) &&
+    players.some((player) => (player as LanPlayerInfo).id === "host")
   );
 }
 
@@ -268,11 +350,8 @@ export function decodeWireMessage(raw: unknown): DecodeResult {
 
   if (GUEST_MESSAGE_TYPES.has(type)) {
     if (type === "HELLO") {
-      if (parsed.role !== "guest" || !isLanPlayerInfo(parsed.player)) {
+      if (!isLanPlayerInfo(parsed.player) || !isGuestId(parsed.player.id)) {
         return fail("BAD_MESSAGE", "Malformed HELLO.");
-      }
-      if (parsed.player.id !== "guest") {
-        return fail("BAD_MESSAGE", "HELLO must identify the guest.");
       }
       return { ok: true, message: parsed as unknown as GuestToHostMessage };
     }
@@ -299,6 +378,13 @@ export function decodeWireMessage(raw: unknown): DecodeResult {
   if (type === "BYE") {
     if (parsed.reason !== "host-closed") {
       return fail("BAD_MESSAGE", "Malformed BYE.");
+    }
+    return { ok: true, message: parsed as unknown as HostToGuestMessage };
+  }
+
+  if (type === "LOBBY") {
+    if (!isGameMode(parsed.mode) || !isLobbyPlayers(parsed.players)) {
+      return fail("BAD_MESSAGE", "Malformed LOBBY.");
     }
     return { ok: true, message: parsed as unknown as HostToGuestMessage };
   }

@@ -1,5 +1,3 @@
-import type { LanRole } from "../protocol";
-
 /** Runtime support screen, checked before any pairing UI is shown. */
 export type LanSupportReason =
   | "insecure-context"
@@ -35,14 +33,9 @@ export function getLanSupport(
 export const LAN_SUPPORT_COPY: Readonly<Record<LanSupportReason, string>> =
   Object.freeze({
     "insecure-context":
-      "Este modo necesita una conexión segura (HTTPS) o la PWA instalada.",
+      "Este modo necesita una conexión segura (HTTPS) o la app instalada.",
     "no-webrtc":
       "Este navegador no permite conexiones directas entre dispositivos. Prueba con Chrome, Edge, Safari o Firefox actualizados.",
     "no-datachannel":
       "Este navegador no admite el canal de datos necesario para jugar.",
   });
-
-export const LAN_ROLE_LABEL: Readonly<Record<LanRole, string>> = Object.freeze({
-  host: "Anfitrión · rojo",
-  guest: "Invitado · amarillo",
-});

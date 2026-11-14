@@ -1,15 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { createMemoryTransportPair } from "./transport";
-import type { WireMessage } from "./protocol";
+import { PARTY_PROTOCOL_VERSION, type WireMessage } from "./protocol";
 
 const HELLO: WireMessage = {
   type: "HELLO",
-  protocol: 1,
-  role: "guest",
-  player: { id: "guest", name: "Bruno", avatar: "/pictures/dog.png" },
+  protocol: PARTY_PROTOCOL_VERSION,
+  player: { id: "guest-1", name: "Bruno", avatar: "/pictures/dog.png" },
 };
 
-const BYE: WireMessage = { type: "BYE", protocol: 1, reason: "host-closed" };
+const BYE: WireMessage = {
+  type: "BYE",
+  protocol: PARTY_PROTOCOL_VERSION,
+  reason: "host-closed",
+};
 
 describe("memory transport pair", () => {
   test("queues messages until both ends are connected", async () => {
@@ -51,7 +54,7 @@ describe("memory transport pair", () => {
     await pair.guest.connect();
 
     expect(() =>
-      pair.guest.send({ type: "NOPE", protocol: 1 } as unknown as WireMessage),
+      pair.guest.send({ type: "NOPE", protocol: PARTY_PROTOCOL_VERSION } as unknown as WireMessage),
     ).toThrow();
   });
 

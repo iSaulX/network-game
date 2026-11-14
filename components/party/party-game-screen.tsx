@@ -1,62 +1,83 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DrawablyAlert } from "drawably/react";
 import { GameStage } from "@/components/game/game-stage";
 import type { GameFeedback } from "@/components/game/game-feedback";
-import { createLanProfiles } from "@/components/lan/roster";
+import { partyProfiles } from "@/components/party/party-profiles";
+import {
+  chooseBarrier,
+  chooseBonusMove,
+  chooseMove,
+} from "@/lib/bots/policy";
 import type { BonusMove, DieValue, Move } from "@/lib/parchis/types";
 import type { GameSession, SessionSnapshot } from "@/lib/party/session";
-import type { LanRole, LanRoster } from "@/lib/party/protocol";
-import { PAIRING_FAILURE_COPY } from "@/lib/party/webrtc/pairing";
 
 const ROLL_ANIMATION_MS = 750;
+/** Delay between two auto-play actions, matching the local bot pacing. */
+const AUTO_STEP_MS = 900;
 /** After this long without a reply the banner explains the wait. */
 const SLOW_CONNECTION_MS = 4000;
 
-export interface LanGameScreenProps {
+export interface PartyGameScreenProps {
   readonly session: GameSession;
   readonly snapshot: SessionSnapshot;
-  readonly roster: LanRoster;
-  readonly role: LanRole;
+  readonly viewerId: string;
   readonly feedback: GameFeedback;
   onLeave(): void;
 }
 
 /**
- * The in-game LAN screen. It reuses `GameStage` verbatim and only supplies the
- * session's state, the LAN roster and the connection banner.
+ * The in-game online screen. It reuses `GameStage` verbatim and only supplies
+ * the session's state, the full roster (humans and bots) and the connection
+ * banner.
  *
  * The dice tumble is presentational: it echoes the committed faces from the
- * newest `roll` event for both devices, so no value is ever invented locally.
+ * newest `roll` event for every device, so no value is ever invented locally.
  */
-export function LanGameScreen({
+export function PartyGameScreen({
   session,
   snapshot,
-  roster,
-  role,
+  viewerId,
   feedback,
   onLeave,
-}: LanGameScreenProps) {
+}: PartyGameScreenProps) {
   const state = snapshot.state;
-  const profiles = createLanProfiles(roster);
-  const profile = profiles.find((item) => item.id === role) ?? profiles[0]!;
-  const opponent = roster[role === "host" ? "guest" : "host"];
+  const profiles = useMemo(
+    () =>
+      snapshot.roster
+        ? partyProfiles(snapshot.roster, snapshot.mode)
+        : [],
+    [snapshot.mode, snapshot.roster],
+  );
+  const viewer = profiles.find((item) => item.id === viewerId) ?? profiles[0];
+  const opponent = profiles.find(
+    (item) =>
+      item.id !== viewerId &&
+      !item.id.startsWith("bot-") &&
+      !snapshot.disconnected.includes(item.id),
+  );
 
   const [rolling, setRolling] = useState<{
     playerId: string;
     faces: [DieValue, DieValue];
   } | null>(null);
   const [slow, setSlow] = useState(false);
+  const [autoMode, setAutoMode] = useState(false);
 
   const rollTimeoutRef = useRef<number | null>(null);
   const slowTimeoutRef = useRef<number | null>(null);
+  const autoTimeoutRef = useRef<number | null>(null);
+  const autoModeRef = useRef(autoMode);
 
-  const myTurn =
+  const canAct =
     state !== null &&
     state.phase !== "finished" &&
-    state.players[state.currentPlayerIndex]?.id === role &&
+    state.players[state.currentPlayerIndex]?.id === viewerId &&
     snapshot.status === "connected";
+  // Auto-play temporarily hands the viewer's seat to the same policy the
+  // local bots use; the session still validates every action on the host.
+  const myTurn = canAct && !autoMode;
 
   // Timers must never outlive the screen.
   useEffect(
@@ -69,11 +90,19 @@ export function LanGameScreen({
         window.clearTimeout(slowTimeoutRef.current);
         slowTimeoutRef.current = null;
       }
+      if (autoTimeoutRef.current !== null) {
+        window.clearTimeout(autoTimeoutRef.current);
+        autoTimeoutRef.current = null;
+      }
     },
     [],
   );
 
-  // Narrate new events and the turn change, mirroring `GameStage`'s local mode.
+  useEffect(() => {
+    autoModeRef.current = autoMode;
+  }, [autoMode]);
+
+  // Narrate new events and the turn change, mirroring the local mode.
   const previousLogLength = useRef(state?.log.length ?? 0);
   const previousCurrentPlayer = useRef<string | null>(null);
 
@@ -85,15 +114,15 @@ export function LanGameScreen({
       previousLogLength.current = next.state.log.length;
 
       if (next.state.log.length > seen) {
-        feedback.events(next.state.log.slice(seen), role);
+        feedback.events(next.state.log.slice(seen), viewerId);
       }
 
       const currentId =
         next.state.players[next.state.currentPlayerIndex]?.id ?? null;
       if (
         previousCurrentPlayer.current !== null &&
-        previousCurrentPlayer.current !== role &&
-        currentId === role &&
+        previousCurrentPlayer.current !== viewerId &&
+        currentId === viewerId &&
         next.state.phase !== "finished"
       ) {
         feedback.yourTurn();
@@ -133,11 +162,9 @@ export function LanGameScreen({
         setRolling(null);
       }, ROLL_ANIMATION_MS);
     },
-    [feedback, role],
+    [feedback, viewerId],
   );
 
-  // A snapshot is an external event stream, so reacting to it in an effect is
-  // the intended pattern; the mirror state (rolling / slow) is presentational.
   const previousVersion = useRef(snapshot.version);
   useEffect(() => {
     if (previousVersion.current === snapshot.version) return;
@@ -182,23 +209,91 @@ export function LanGameScreen({
     [myTurn, session],
   );
 
+  // Auto-play: one policy action per tick while the viewer's seat is current.
+  useEffect(() => {
+    if (!autoMode || !canAct || !state || !viewer) {
+      return;
+    }
+
+    const playStep = () => {
+      autoTimeoutRef.current = null;
+
+      if (!autoModeRef.current) {
+        return;
+      }
+
+      switch (state.phase) {
+        case "awaiting-roll":
+          feedback.roll("human");
+          startSlowNotice();
+          session.roll();
+          return;
+        case "awaiting-move": {
+          const move = chooseMove(state, viewerId);
+          if (move) session.move(move);
+          return;
+        }
+        case "awaiting-bonus": {
+          const move = chooseBonusMove(state, viewerId);
+          if (move) session.bonusMove(move);
+          return;
+        }
+        case "awaiting-barrier": {
+          const progress = chooseBarrier(state, viewerId);
+          if (progress !== null) session.chooseBarrier(progress);
+          return;
+        }
+        default:
+          return;
+      }
+    };
+
+    autoTimeoutRef.current = window.setTimeout(playStep, AUTO_STEP_MS);
+
+    return () => {
+      if (autoTimeoutRef.current !== null) {
+        window.clearTimeout(autoTimeoutRef.current);
+        autoTimeoutRef.current = null;
+      }
+    };
+  }, [autoMode, canAct, feedback, session, state, viewer, viewerId]);
+
+  const handleAutoChange = useCallback(
+    (next: boolean) => {
+      feedback.tap();
+      setAutoMode(next);
+    },
+    [feedback],
+  );
+
   const connectionCopy =
     snapshot.status === "failed"
-      ? "Se ha perdido la conexión con el otro dispositivo."
+      ? "Se ha perdido la conexión."
       : snapshot.status === "disconnected"
         ? "La conexión se ha cerrado. La partida ha terminado."
         : null;
 
+  if (!state || !viewer) {
+    return null;
+  }
+
+  const isHost = viewerId === "host";
+
   return (
     <>
       <GameStage
-        state={state!}
-        viewColor={profile.color}
-        humanPlayerId={role}
+        state={state}
+        viewColor={viewer.color}
+        humanPlayerId={viewerId}
         humanControlled={myTurn}
+        autoControl={{ checked: autoMode, onChange: handleAutoChange }}
         remoteHuman
         profiles={profiles}
-        modeLabel={`1 vs 1 en red · ${role === "host" ? "anfitrión" : "invitado"}`}
+        modeLabel={
+          snapshot.mode === "1v1"
+            ? "1 contra 1 · en línea"
+            : "Todos contra todos · en línea"
+        }
         rolling={rolling}
         feedback={feedback}
         onRoll={handleRoll}
@@ -212,7 +307,9 @@ export function LanGameScreen({
             </DrawablyAlert>
           ) : slow ? (
             <p className="text-center text-sm text-stone-600">
-              La conexión va lenta… esperando a {opponent.name}.
+              {opponent
+                ? `La conexión va lenta… esperando a ${opponent.name}.`
+                : "La conexión va lenta…"}
             </p>
           ) : snapshot.error ? (
             <p className="text-center text-sm text-stone-600">
@@ -228,9 +325,15 @@ export function LanGameScreen({
       />
       {snapshot.status !== "connected" && (
         <p className="sr-only" aria-live="assertive">
-          {connectionCopy ?? PAIRING_FAILURE_COPY["peer-left"]}
+          {connectionCopy ?? "La conexión se ha interrumpido."}
         </p>
       )}
+      {isHost && snapshot.status !== "connected" ? (
+        <p className="sr-only" aria-live="polite">
+          Algunos jugadores se han desconectado; sus fichas las mueve la
+          máquina.
+        </p>
+      ) : null}
     </>
   );
 }

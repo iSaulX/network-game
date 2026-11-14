@@ -12,6 +12,11 @@ const nextConfig: NextConfig = {
   ...(isDesktopBuild
     ? {
         output: "export" as const,
+        // The static export has no server, so the signaling route handler
+        // (`route.ts`, a `.ts` file) must not be part of the build at all.
+        // Every page in this app is a `.tsx` file, so dropping `.ts` from the
+        // page extensions excludes route handlers from the export.
+        pageExtensions: ["tsx", "jsx", "js"],
         // The export has no Next.js image optimizer or server, so images are
         // served directly from the bundled public/ files.
         images: { unoptimized: true },
