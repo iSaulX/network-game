@@ -25,9 +25,11 @@ import { usePartySession } from "@/lib/party/versus/use-party-session";
 import {
   describeLobby,
   LOBBY_FAILURE_COPY,
+  seatLabel,
 } from "@/lib/party/versus/lobby";
 import type { GameMode, PlayerId } from "@/lib/party/protocol";
 import { COLOR_NAMES, type ParchisColor } from "@/lib/parchis/board-geometry";
+import { boardColorOf } from "@/lib/party/seats";
 import { getLanSupport, LAN_SUPPORT_COPY } from "@/lib/party/webrtc/support";
 import { RoomCode } from "@/components/setup/room-code";
 import { SeatFillPicker } from "@/components/setup/seat-fill-picker";
@@ -1003,8 +1005,10 @@ function LobbyStep({
         <RoomCode code={lobby.code} />
 
         <p className="text-center text-xs leading-5 text-stone-500">
-          {guestCount} de {guestSeats} invitados dentro. Los asientos vacíos los
-          ocupan bots cuando empieza la partida.
+          {guestCount} de {guestSeats} invitados dentro.{" "}
+          {isHost
+            ? "En cada asiento libre elige si lo ocupa un bot o queda vacío."
+            : "Los asientos libres los ocupa un bot al empezar, salvo que el anfitrión los deje vacíos."}
         </p>
 
         {lobby.phase === "failed" && (
@@ -1030,15 +1034,35 @@ function LobbyStep({
         </div>
 
         <ul className="flex flex-col gap-2">
-          {seats.map((seatId) => (
-            <LobbySeat
-              key={seatId}
-              seatId={seatId}
-              mode={lobby.mode}
-              isHost={seatId === "host"}
-              player={playersById.get(seatId) ?? null}
-            />
-          ))}
+          {seats.map((seatId) => {
+            const player = playersById.get(seatId) ?? null;
+            const empty = lobby.emptySeats.includes(seatId);
+            // Only the host decides, and only for unoccupied guest seats.
+            const editable = isHost && !player && seatId !== "host";
+
+            return (
+              <LobbySeat
+                key={seatId}
+                seatId={seatId}
+                mode={lobby.mode}
+                isHost={seatId === "host"}
+                player={player}
+                empty={empty}
+                action={
+                  editable ? (
+                    <SeatFillPicker
+                      color={boardColorOf(seatId, lobby.mode) ?? "red"}
+                      empty={empty}
+                      canEmpty={guestSeats - lobby.emptySeats.length > 1}
+                      compact
+                      label={seatLabel(seatId)}
+                      onChange={(next) => party.setSeatEmpty(seatId, next)}
+                    />
+                  ) : undefined
+                }
+              />
+            );
+          })}
         </ul>
 
         <div className="mt-auto flex flex-wrap gap-2 pt-2">

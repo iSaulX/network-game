@@ -77,6 +77,8 @@ export interface PartyApi {
   joinGame(code: string): void;
   /** Host only: starts the match; empty seats become bots. */
   startGame(): void;
+  /** Host only: leaves a seat empty (no bot) or fills it with a bot again. */
+  setSeatEmpty(seatId: string, empty: boolean): void;
   retry(): void;
   abort(): void;
 }
@@ -237,6 +239,7 @@ export function usePartySession(
           players: nextSnapshot.lobby,
           mode: nextSnapshot.mode,
           capacity: capacityForMode(nextSnapshot.mode),
+          emptySeats: nextSnapshot.emptySeats,
         });
         lobbyRef.current = reduced;
         return reduced;
@@ -663,6 +666,14 @@ export function usePartySession(
     hostRef.current?.start();
   }, [feedback]);
 
+  const setSeatEmpty = useCallback(
+    (seatId: string, empty: boolean) => {
+      feedback.select();
+      hostRef.current?.setSeatEmpty(seatId, empty);
+    },
+    [feedback],
+  );
+
   const retry = useCallback(() => {
     feedback.tap();
     const previous = lobbyRef.current;
@@ -692,6 +703,7 @@ export function usePartySession(
     openJoin,
     joinGame,
     startGame,
+    setSeatEmpty,
     retry,
     abort,
   };

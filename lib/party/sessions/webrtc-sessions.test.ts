@@ -226,6 +226,58 @@ describe("party sessions", () => {
     ).toEqual(["yellow", "red"]);
   });
 
+  test("the host can leave seats empty instead of filling them with bots", () => {
+    const room = openRoom("all", 1);
+
+    room.host.setSeatEmpty("guest-2", true);
+    room.host.setSeatEmpty("guest-3", true);
+
+    expect(room.host.snapshot.emptySeats).toEqual(["guest-2", "guest-3"]);
+    // Guests learn the choice before the match starts.
+    expect(room.guests[0]!.snapshot.emptySeats).toEqual([
+      "guest-2",
+      "guest-3",
+    ]);
+
+    room.host.start();
+
+    expect(
+      room.guests[0]!.snapshot.roster?.players.map((player) => player.id),
+    ).toEqual(["host", "guest-1"]);
+    expect(room.guests[0]!.snapshot.state?.players).toHaveLength(2);
+    // The room keeps its "all" colours even with only two seats.
+    expect(room.guests[0]!.snapshot.mode).toBe("all");
+  });
+
+  test("empty seats never shrink the table below two players", () => {
+    const room = openRoom("all", 1);
+
+    room.host.setSeatEmpty("guest-1", true);
+    room.host.setSeatEmpty("guest-2", true);
+    room.host.setSeatEmpty("guest-3", true);
+
+    // A connected guest's seat is never emptied; the other two are.
+    expect(room.host.snapshot.emptySeats).toEqual(["guest-2", "guest-3"]);
+
+    room.host.start();
+    expect(room.host.snapshot.state?.players).toHaveLength(2);
+  });
+
+  test("the host cannot empty every rival seat", () => {
+    const room = openRoom("all", 0);
+
+    // With no guests, three of the four seats could be emptied; the room keeps
+    // two seats so the engine can start.
+    room.host.setSeatEmpty("guest-1", true);
+    room.host.setSeatEmpty("guest-2", true);
+    room.host.setSeatEmpty("guest-3", true);
+
+    expect(room.host.snapshot.emptySeats).toHaveLength(2);
+
+    room.host.start();
+    expect(room.host.snapshot.state?.players).toHaveLength(2);
+  });
+
   test("a four-human match plays to a win with identical state everywhere", () => {
     const room = openRoom("all", 3);
     room.host.start();

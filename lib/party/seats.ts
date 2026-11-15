@@ -75,6 +75,11 @@ export function isBotPlayerId(id: string): boolean {
   return id.startsWith("bot-");
 }
 
+/** Seat ids a mode can leave unoccupied (never the host's own seat). */
+export function seatIdsFor(mode: GameMode): readonly PlayerId[] {
+  return seatsFor(mode);
+}
+
 /** Board colour of any seat id (human or bot) within a mode. */
 export function boardColorOf(
   id: string,
@@ -97,29 +102,54 @@ export function boardColorOf(
 
 /**
  * Completes the connected humans with bots for the mode's remaining seats and
- * returns the full roster, ordered by seat.
+ * returns the full roster, ordered by seat. Seats listed in `emptyIds` are
+ * skipped entirely, so the match seats fewer players.
  */
 export function buildRoster(
   mode: GameMode,
   humans: readonly LanPlayerInfo[],
+  emptyIds: readonly string[] = [],
 ): LanRoster {
   const byId = new Map(humans.map((player) => [player.id, player] as const));
+  const empty = new Set(emptyIds);
 
-  const players: LanPlayerInfo[] = seatsFor(mode).map((id) => {
-    const human = byId.get(id);
-    if (human) {
-      return { ...human, id };
+  const players: LanPlayerInfo[] = seatsFor(mode)
+    .filter((id) => !empty.has(id))
+    .map((id) => {
+      const human = byId.get(id);
+      if (human) {
+        return { ...human, id };
+      }
+      return botForColor(seatBoardColor(mode, id) as ParchisColor);
+    });
+
+  // A room must always seat a second player for the engine to start.
+  if (players.length < 2) {
+    const missing = seatsFor(mode).find(
+      (id) => !players.some((player) => player.id === id),
+    );
+    if (missing) {
+      const human = byId.get(missing);
+      players.push(
+        human
+          ? { ...human, id: missing }
+          : botForColor(seatBoardColor(mode, missing) as ParchisColor),
+      );
     }
-    return botForColor(seatBoardColor(mode, id) as ParchisColor);
-  });
+  }
 
   return { players };
 }
 
-/** Engine player configs, sorted by the shared board-colour turn order. */
-export function buildConfigs(roster: LanRoster): PlayerConfig[] {
-  const mode: GameMode = roster.players.length === 2 ? "1v1" : "all";
-
+/**
+ * Engine player configs, sorted by the shared board-colour turn order. The
+ * room's mode decides the seat colours, because a two-player `all` room still
+ * uses the four-seat colour map.
+ */
+export function buildConfigs(
+  roster: LanRoster,
+  mode: GameMode = "all",
+): PlayerConfig[] {
   return [...roster.players]
     .sort(
       (a, b) =>

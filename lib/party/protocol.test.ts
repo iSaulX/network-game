@@ -50,11 +50,13 @@ describe("wire protocol", () => {
           { id: "host", name: "Ana", avatar: "/pictures/dog.png" },
           { id: "guest-1", name: "Bruno", avatar: "/pictures/octupus.png" },
         ],
+        emptySeats: [],
       },
       {
         type: "START",
         protocol: PARTY_PROTOCOL_VERSION,
         version: 0,
+        mode: "1v1",
         roster: ROSTER,
         state: STATE,
       },
@@ -94,11 +96,50 @@ describe("wire protocol", () => {
       type: "START",
       protocol: PARTY_PROTOCOL_VERSION,
       version: 0,
+      mode: "all",
       roster: SOLO_ROSTER,
       state: STATE,
     };
 
     expect(decodeWireMessage(JSON.stringify(message)).ok).toBeTrue();
+  });
+
+  test("accepts rosters with 2 to 4 seats and a LOBBY with empty seats", () => {
+    const start = (playerCount: number) => ({
+      type: "START",
+      protocol: PARTY_PROTOCOL_VERSION,
+      version: 0,
+      mode: "all",
+      roster: { players: ROSTER.players.slice(0, playerCount) },
+      state: STATE,
+    });
+
+    for (const count of [2, 3, 4]) {
+      expect(decodeWireMessage(JSON.stringify(start(count))).ok).toBeTrue();
+    }
+    expect(
+      decodeWireMessage(JSON.stringify(start(1))).ok,
+    ).toBeFalse();
+
+    const lobby = (emptySeats: unknown) => ({
+      type: "LOBBY",
+      protocol: PARTY_PROTOCOL_VERSION,
+      mode: "all",
+      players: [{ id: "host", name: "Ana", avatar: "/pictures/dog.png" }],
+      emptySeats,
+    });
+
+    expect(decodeWireMessage(JSON.stringify(lobby(["guest-2"]))).ok).toBeTrue();
+    // The host's own seat, a connected guest, a bot id or a duplicate is not
+    // a valid empty seat.
+    expect(decodeWireMessage(JSON.stringify(lobby(["host"]))).ok).toBeFalse();
+    expect(
+      decodeWireMessage(JSON.stringify(lobby(["bot-red"]))).ok,
+    ).toBeFalse();
+    expect(
+      decodeWireMessage(JSON.stringify(lobby(["guest-2", "guest-2"]))).ok,
+    ).toBeFalse();
+    expect(decodeWireMessage(JSON.stringify(lobby("guest-2"))).ok).toBeFalse();
   });
 
   test("rejects unknown types, wrong protocols and non-text input", () => {

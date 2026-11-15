@@ -15,6 +15,10 @@ type SeatFillPickerProps = {
   /** False when the table already has the minimum of two seats. */
   canEmpty: boolean;
   onChange(empty: boolean): void;
+  /** Row label; defaults to the colour name. */
+  label?: string;
+  /** Short trigger label for the lobby; defaults to "Con bot"/"Vacío". */
+  compact?: boolean;
 };
 
 /**
@@ -27,11 +31,14 @@ export function SeatFillPicker({
   empty,
   canEmpty,
   onChange,
+  label,
+  compact = false,
 }: SeatFillPickerProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const accent = COLOR_ACCENT[color];
   const currentLabel = empty ? "Vacío" : "Con bot";
+  const rowLabel = label ?? COLOR_NAMES[color];
 
   useEffect(() => {
     if (!open) return;
@@ -65,7 +72,7 @@ export function SeatFillPicker({
           className="h-3 w-3 shrink-0 rounded-full"
           style={{ backgroundColor: accent }}
         />
-        <span className="truncate">{COLOR_NAMES[color]}</span>
+        <span className="truncate">{rowLabel}</span>
       </span>
 
       <Popover.Root isOpen={open} onOpenChange={setOpen}>
@@ -78,8 +85,10 @@ export function SeatFillPicker({
                 triggerRef.current = node;
               }}
               aria-haspopup="dialog"
-              aria-label={`${COLOR_NAMES[color]}: ${currentLabel}. Cambiar ocupación del asiento`}
-              className={`${heroClassName ?? ""} flex w-36 select-none items-center justify-center gap-1.5 px-3 py-1.5 text-xs`}
+              aria-label={`${rowLabel}: ${currentLabel}. Cambiar ocupación del asiento`}
+              className={`${heroClassName ?? ""} flex ${
+                compact ? "w-28" : "w-36"
+              } select-none items-center justify-center gap-1.5 px-3 py-1.5 text-xs`}
             >
               <span>{currentLabel}</span>
               <span aria-hidden="true" className="text-[9px]">
@@ -98,7 +107,7 @@ export function SeatFillPicker({
 
           <Popover.Dialog>
             <Popover.Heading className="mb-2 px-1 text-sm font-semibold text-stone-600">
-              Asiento {COLOR_NAMES[color]}
+              Asiento {rowLabel}
             </Popover.Heading>
 
             <div className="flex flex-col gap-1.5">

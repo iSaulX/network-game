@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { GameMode, LanPlayerInfo } from "@/lib/party/protocol";
 import { boardColorOf } from "@/lib/party/seats";
 import { AvatarVisual } from "@/components/avatar-visual";
@@ -12,10 +13,21 @@ export interface LobbySeatProps {
   readonly isHost: boolean;
   /** The room's mode: a 1v1 seats the guest on the opposite corner. */
   readonly mode: GameMode;
+  /** True when the host left this seat without a bot. */
+  readonly empty?: boolean;
+  /** Optional inline control (the host's bot/empty picker). */
+  readonly action?: ReactNode;
 }
 
 /** One seat row in the lobby: avatar, name and role, with empty seats marked. */
-export function LobbySeat({ player, seatId, isHost, mode }: LobbySeatProps) {
+export function LobbySeat({
+  player,
+  seatId,
+  isHost,
+  mode,
+  empty = false,
+  action,
+}: LobbySeatProps) {
   const boardColor = boardColorOf(seatId, mode) ?? "red";
   const accent = COLOR_ACCENT[boardColor];
 
@@ -39,29 +51,34 @@ export function LobbySeat({ player, seatId, isHost, mode }: LobbySeatProps) {
           <AvatarVisual image={player.avatar} size="sm" />
         ) : (
           <span aria-hidden="true" className="text-lg text-stone-400">
-            +
+            {empty ? "—" : "+"}
           </span>
         )}
       </span>
 
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-semibold leading-tight">
-          {player ? player.name : "Asiento libre"}
+          {player ? player.name : empty ? "Sin jugador" : "Asiento libre"}
         </p>
         <p className="text-[11px] leading-tight text-stone-600">
           {isHost ? "Anfitrión" : seatLabel(seatId)}
-          {player ? "" : " · lo ocupa un bot al empezar"}
+          {player
+            ? ""
+            : empty
+              ? " · queda vacío en la partida"
+              : " · lo ocupa un bot al empezar"}
         </p>
       </div>
 
-      {player ? (
-        <span
-          className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-          style={{ color: accent }}
-        >
-          Listo
-        </span>
-      ) : null}
+      {action ??
+        (player ? (
+          <span
+            className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+            style={{ color: accent }}
+          >
+            Listo
+          </span>
+        ) : null)}
     </li>
   );
 }

@@ -144,6 +144,30 @@ describe("lobby reducer", () => {
     expect(partial.detail).toContain("1 de 3");
   });
 
+  test("empty seats survive lobby updates and are reported in the copy", () => {
+    const lobby = reduceLobby(hostLobby("all"), {
+      type: "LOBBY",
+      players: [HOST],
+      mode: "all",
+      capacity: 4,
+      emptySeats: ["guest-2", "guest-3"],
+    });
+
+    expect(lobby.emptySeats).toEqual(["guest-2", "guest-3"]);
+    const described = describeLobby(lobby);
+    expect(described.detail).toContain("2 asientos quedarán vacíos");
+
+    // An update without the field keeps the previous choice.
+    const updated = reduceLobby(lobby, {
+      type: "LOBBY",
+      players: [HOST, GUEST],
+      mode: "all",
+      capacity: 4,
+    });
+    expect(updated.emptySeats).toEqual(["guest-2", "guest-3"]);
+    expect(updated.players).toEqual([HOST, GUEST]);
+  });
+
   test("seat labels name the host and each guest", () => {
     expect(seatLabel("host")).toBe("Anfitrión");
     expect(seatLabel("guest-2")).toBe("Invitado 2");

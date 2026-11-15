@@ -10,7 +10,7 @@
  */
 import type { BonusMove, GameEvent, GameState, Move } from "@/lib/parchis/types";
 
-export const PARTY_PROTOCOL_VERSION = 2 as const;
+export const PARTY_PROTOCOL_VERSION = 3 as const;
 
 /** Hard cap for one data-channel message. State snapshots are far smaller. */
 export const MAX_WIRE_CHARS = 64 * 1024;
@@ -89,11 +89,18 @@ export type HostToGuestMessage =
       readonly mode: GameMode;
       /** Connected humans, host first; empty seats are not listed. */
       readonly players: readonly LanPlayerInfo[];
+      /**
+       * Seats the host chose to leave unoccupied. They are not filled by bots
+       * when the match starts, so the table seats fewer players.
+       */
+      readonly emptySeats: readonly string[];
     }
   | {
       readonly type: "START";
       readonly protocol: number;
       readonly version: number;
+      /** The room's mode: a 1v1 and an "all" room can both seat two players. */
+      readonly mode: GameMode;
       readonly roster: LanRoster;
       readonly state: GameState;
     }
@@ -283,6 +290,30 @@ function isLobbyPlayers(value: unknown): value is readonly LanPlayerInfo[] {
   );
 }
 
+/**
+ * Seats the host marked as empty. They are seat ids (`host`/`guest-N`), never
+ * bots, and must be unique. The host's own seat is never empty.
+ */
+function isEmptySeatList(
+  value: unknown,
+  players: readonly LanPlayerInfo[],
+): value is readonly string[] {
+  // Absent means "no empty seats", which keeps older senders decodable.
+  if (value === undefined) return true;
+
+  if (
+    !Array.isArray(value) ||
+    value.length > 3 ||
+    !value.every((item) => typeof item === "string" && /^guest-[1-3]$/.test(item)) ||
+    new Set(value as string[]).size !== value.length
+  ) {
+    return false;
+  }
+
+  const occupied = new Set<string>(players.map((player) => player.id));
+  return (value as string[]).every((item) => !occupied.has(item));
+}
+
 function isRoster(value: unknown): value is LanRoster {
   if (!isRecord(value) || !Array.isArray(value.players)) {
     return false;
@@ -291,7 +322,9 @@ function isRoster(value: unknown): value is LanRoster {
   const players = value.players as unknown[];
 
   return (
-    (players.length === 2 || players.length === 4) &&
+    // A table may leave seats empty, so it can seat 2 to 4 players.
+    players.length >= 2 &&
+    players.length <= 4 &&
     players.every(isLanPlayerInfo) &&
     hasUniqueIds(players as LanPlayerInfo[]) &&
     players.some((player) => (player as LanPlayerInfo).id === "host")
@@ -383,7 +416,11 @@ export function decodeWireMessage(raw: unknown): DecodeResult {
   }
 
   if (type === "LOBBY") {
-    if (!isGameMode(parsed.mode) || !isLobbyPlayers(parsed.players)) {
+    if (
+      !isGameMode(parsed.mode) ||
+      !isLobbyPlayers(parsed.players) ||
+      !isEmptySeatList(parsed.emptySeats, parsed.players)
+    ) {
       return fail("BAD_MESSAGE", "Malformed LOBBY.");
     }
     return { ok: true, message: parsed as unknown as HostToGuestMessage };
@@ -413,8 +450,10 @@ export function decodeWireMessage(raw: unknown): DecodeResult {
     return fail("BAD_MESSAGE", "Malformed state.");
   }
 
-  if (type === "START" && !isRoster(parsed.roster)) {
-    return fail("BAD_MESSAGE", "Malformed roster.");
+  if (type === "START") {
+    if (!isGameMode(parsed.mode) || !isRoster(parsed.roster)) {
+      return fail("BAD_MESSAGE", "Malformed roster.");
+    }
   }
 
   if (type === "STATE" && !isEventArray(parsed.events)) {

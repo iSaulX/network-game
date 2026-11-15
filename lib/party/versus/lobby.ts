@@ -42,6 +42,8 @@ export interface LobbyState {
   readonly failure: LobbyFailure | null;
   /** Connected humans, host first. Empty seats are not listed. */
   readonly players: readonly LanPlayerInfo[];
+  /** Seats the host chose to leave without a bot. */
+  readonly emptySeats: readonly string[];
   /** The room's seat count. */
   readonly capacity: 2 | 4;
 }
@@ -53,6 +55,7 @@ export const INITIAL_LOBBY_STATE: LobbyState = Object.freeze({
   code: null,
   failure: null,
   players: [],
+  emptySeats: [],
   capacity: 2,
 });
 
@@ -72,6 +75,7 @@ export type LobbyEvent =
       readonly players: readonly LanPlayerInfo[];
       readonly mode: GameMode;
       readonly capacity: 2 | 4;
+      readonly emptySeats?: readonly string[];
     }
   | { readonly type: "CONNECTED" }
   | { readonly type: "FAIL"; readonly failure: LobbyFailure }
@@ -147,6 +151,7 @@ export function reduceLobby(state: LobbyState, event: LobbyEvent): LobbyState {
         code: event.code,
         failure: null,
         players: event.players,
+        emptySeats: [],
         capacity: event.mode === "1v1" ? 2 : 4,
       };
 
@@ -161,10 +166,13 @@ export function reduceLobby(state: LobbyState, event: LobbyEvent): LobbyState {
         code: event.code,
         failure: null,
         players: [],
+        emptySeats: [],
         capacity: state.capacity,
       };
 
     case "LOBBY": {
+      const emptySeats = event.emptySeats ?? state.emptySeats;
+
       if (
         state.players.length === event.players.length &&
         state.players.every(
@@ -174,7 +182,9 @@ export function reduceLobby(state: LobbyState, event: LobbyEvent): LobbyState {
             player.avatar === event.players[index]?.avatar,
         ) &&
         state.mode === event.mode &&
-        state.capacity === event.capacity
+        state.capacity === event.capacity &&
+        state.emptySeats.length === emptySeats.length &&
+        state.emptySeats.every((seat) => emptySeats.includes(seat))
       ) {
         return state;
       }
@@ -184,6 +194,7 @@ export function reduceLobby(state: LobbyState, event: LobbyEvent): LobbyState {
         players: event.players,
         mode: event.mode,
         capacity: event.capacity,
+        emptySeats,
       };
     }
 
@@ -225,17 +236,24 @@ export function describeLobby(state: LobbyState): LobbyDescription {
       };
     case "creating":
       return { title: "Creando la partida…", detail: "", tone: "info" };
-    case "host-lobby":
+    case "host-lobby": {
+      const empty = state.emptySeats.length;
+      const seatCopy =
+        empty > 0
+          ? ` ${empty} ${empty === 1 ? "asiento quedará" : "asientos quedarán"} vacío${empty === 1 ? "" : "s"}.`
+          : "";
+
       return {
         title: "Sala de espera",
         detail:
-          guests === 0
+          (guests === 0
             ? "Comparte el código y empieza cuando quieras: los huecos libres los ocuparán bots."
             : guests < seats
               ? `${guests} de ${seats} invitados dentro. Puedes empezar cuando quieras.`
-              : "Todos dentro. ¡Cuando quieras!",
+              : "Todos dentro. ¡Cuando quieras!") + seatCopy,
         tone: "info",
       };
+    }
     case "guest-form":
       return {
         title: "Unirse a una partida",

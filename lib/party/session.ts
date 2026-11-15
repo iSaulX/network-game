@@ -29,6 +29,8 @@ export interface SessionSnapshot {
   readonly error: SessionError | null;
   /** Seats in the lobby before the match: host first, connected guests next. */
   readonly lobby: readonly LanPlayerInfo[];
+  /** Seats the host left unoccupied; they are not filled by bots. */
+  readonly emptySeats: readonly string[];
   /** Full roster once the match starts, bots included; null before that. */
   readonly roster: LanRoster | null;
   /** Seats whose connection dropped mid-match (their turn is played by a bot). */
@@ -49,6 +51,8 @@ export abstract class GameSession {
 
   /** Begins the match. Only the host implements it; guests throw. */
   abstract start(): void;
+  /** Host only: leaves a seat unoccupied (no bot) or fills it again. */
+  abstract setSeatEmpty(seatId: string, empty: boolean): void;
   abstract roll(): void;
   abstract move(move: Move): void;
   abstract bonusMove(move: BonusMove): void;

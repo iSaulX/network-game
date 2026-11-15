@@ -46,6 +46,7 @@ export class WebRTCGuestSession extends GameSession {
   private status: SessionSnapshot["status"] = "idle";
   private error: SessionSnapshot["error"] = null;
   private lobby: readonly LanPlayerInfo[] = [];
+  private emptySeats: readonly string[] = [];
   private roster: LanRoster | null = null;
   private mode: GameMode = "1v1";
   private disconnected: readonly string[] = [];
@@ -103,6 +104,7 @@ export class WebRTCGuestSession extends GameSession {
       events: this.eventsValue,
       error: this.error,
       lobby: this.lobby,
+      emptySeats: this.emptySeats,
       roster: this.roster,
       disconnected: this.disconnected,
       mode: this.mode,
@@ -114,6 +116,11 @@ export class WebRTCGuestSession extends GameSession {
   }
 
   start(): void {
+    throw new GameSessionError("GUEST_CANNOT_START");
+  }
+
+  /** Guests cannot change the room's seats; the host owns the lobby. */
+  setSeatEmpty(): void {
     throw new GameSessionError("GUEST_CANNOT_START");
   }
 
@@ -203,11 +210,12 @@ export class WebRTCGuestSession extends GameSession {
       case "LOBBY":
         this.mode = message.mode;
         this.lobby = message.players;
+        this.emptySeats = message.emptySeats ?? [];
         this.status = "connected";
         this.notifier.emit(this.snapshot);
         return;
       case "START":
-        this.mode = message.roster.players.length === 2 ? "1v1" : "all";
+        this.mode = message.mode;
         this.roster = message.roster;
         this.game = message.state;
         this.version = message.version;

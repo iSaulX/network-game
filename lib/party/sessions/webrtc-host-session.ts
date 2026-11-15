@@ -20,6 +20,7 @@ import {
   type GameMode,
   type LanPlayerInfo,
   type LanRoster,
+  type PlayerId,
   type WireMessage,
 } from "../protocol";
 import {
@@ -28,7 +29,7 @@ import {
   type SessionSnapshot,
 } from "../session";
 import type { GameTransport, TransportKind } from "../transport";
-import { buildConfigs, buildRoster } from "../seats";
+import { buildConfigs, buildRoster, seatIdsFor } from "../seats";
 
 /** A guest connection owned by the host. */
 export interface HostPeer {
@@ -88,6 +89,7 @@ export class WebRTCHostSession extends GameSession {
   private error: SessionSnapshot["error"] = null;
   private events: readonly GameEvent[] = [];
   private lobby: readonly LanPlayerInfo[] = [];
+  private emptySeats: readonly string[] = [];
   private roster: LanRoster | null = null;
   private disconnected: readonly string[] = [];
   private disposed = false;
@@ -122,6 +124,7 @@ export class WebRTCHostSession extends GameSession {
       events: this.events,
       error: this.error,
       lobby: this.lobby,
+      emptySeats: this.emptySeats,
       roster: this.roster,
       disconnected: this.disconnected,
       mode: this.mode,
@@ -184,14 +187,57 @@ export class WebRTCHostSession extends GameSession {
     this.handlePeerGone(playerId);
   }
 
+  /**
+   * Leaves an unoccupied seat empty (no bot) or fills it with a bot again.
+   * Only guest seats can change, a human who already holds the seat keeps it,
+   * and the room always keeps at least two seats for the engine.
+   */
+  setSeatEmpty(seatId: string, empty: boolean): void {
+    if (this.disposed || this.game) {
+      return;
+    }
+
+    const seats = seatIdsFor(this.mode);
+
+    if (seatId === "host" || !seats.includes(seatId as PlayerId)) {
+      return;
+    }
+
+    if (empty && this.lobby.some((player) => player.id === seatId)) {
+      // A connected guest holds that seat; it cannot be emptied.
+      return;
+    }
+
+    const next = empty
+      ? [...new Set([...this.emptySeats, seatId])]
+      : this.emptySeats.filter((item) => item !== seatId);
+
+    // At least two seats must remain for the match to start.
+    if (seats.length - next.length < 2) {
+      return;
+    }
+
+    const unchanged =
+      next.length === this.emptySeats.length &&
+      next.every((item) => this.emptySeats.includes(item));
+
+    if (unchanged) {
+      return;
+    }
+
+    this.emptySeats = next;
+    this.broadcastLobby();
+    this.notifier.emit(this.snapshot);
+  }
+
   /** Starts the match. Empty seats become bots; nobody has to wait. */
   start(): void {
     if (this.disposed || this.game) {
       return;
     }
 
-    this.roster = buildRoster(this.mode, this.lobby);
-    this.game = createGame(buildConfigs(this.roster));
+    this.roster = buildRoster(this.mode, this.lobby, this.emptySeats);
+    this.game = createGame(buildConfigs(this.roster, this.mode));
     this.version = 0;
     this.status = "connected";
     this.error = null;
@@ -391,7 +437,8 @@ export class WebRTCHostSession extends GameSession {
         type: "START",
         protocol: PARTY_PROTOCOL_VERSION,
         version: this.version,
-        roster: this.roster ?? buildRoster(this.mode, this.lobby),
+        mode: this.mode,
+        roster: this.roster ?? buildRoster(this.mode, this.lobby, this.emptySeats),
         state: this.game,
       });
     } else {
@@ -412,6 +459,13 @@ export class WebRTCHostSession extends GameSession {
       .sort((a, b) => a.id.localeCompare(b.id));
 
     this.lobby = [this.host, ...guests];
+
+    // A human who takes a seat the host had left empty now occupies it.
+    const occupied = new Set<string>(this.lobby.map((player) => player.id));
+    const remaining = this.emptySeats.filter((seat) => !occupied.has(seat));
+    if (remaining.length !== this.emptySeats.length) {
+      this.emptySeats = remaining;
+    }
   }
 
   private handlePeerGone(playerId: string): void {
@@ -524,6 +578,7 @@ export class WebRTCHostSession extends GameSession {
       protocol: PARTY_PROTOCOL_VERSION,
       mode: this.mode,
       players: this.lobby,
+      emptySeats: this.emptySeats,
     };
 
     for (const peer of this.peers.values()) {
@@ -540,6 +595,7 @@ export class WebRTCHostSession extends GameSession {
       type: "START",
       protocol: PARTY_PROTOCOL_VERSION,
       version: this.version,
+      mode: this.mode,
       roster: this.roster,
       state: this.game,
     };
