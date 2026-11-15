@@ -283,7 +283,6 @@ function PlayPageContent() {
 
     if (
       !autoMode &&
-      previousCurrentPlayerId !== null &&
       previousCurrentPlayerId !== setup.human.id &&
       currentPlayerId === setup.human.id &&
       game.phase !== "finished"

@@ -30,6 +30,7 @@ import type { GameMode, PlayerId } from "@/lib/party/protocol";
 import { COLOR_NAMES, type ParchisColor } from "@/lib/parchis/board-geometry";
 import { getLanSupport, LAN_SUPPORT_COPY } from "@/lib/party/webrtc/support";
 import { RoomCode } from "@/components/setup/room-code";
+import { SeatFillPicker } from "@/components/setup/seat-fill-picker";
 
 type Step = "home" | "create" | "join" | "lobby" | "game";
 type Connection = "online" | "bots";
@@ -147,6 +148,7 @@ export function SetupFlow() {
   const [editedName, setEditedName] = useState<string | null>(null);
   const [selectedAvatar, setSelectedAvatar] = useState<number | null>(null);
   const [offlineColor, setOfflineColor] = useState<ParchisColor>("blue");
+  const [emptyColors, setEmptyColors] = useState<readonly ParchisColor[]>([]);
 
   const [step, setStep] = useState<Step>("home");
   const [connection, setConnection] = useState<Connection>("online");
@@ -197,9 +199,22 @@ export function SetupFlow() {
         name: playerName,
         avatar: avatar.image,
       });
+      // A four-player table may leave colours unoccupied; a 1v1 never does.
+      if (mode === "all") {
+        const empties = emptyColors.filter((item) => item !== offlineColor);
+        if (empties.length > 0) params.set("empty", empties.join(","));
+      }
       router.push(`/play?${params.toString()}`);
     },
-    [avatar.image, feedback, offlineColor, playerName, rememberProfile, router],
+    [
+      avatar.image,
+      emptyColors,
+      feedback,
+      offlineColor,
+      playerName,
+      rememberProfile,
+      router,
+    ],
   );
 
   const chooseOnlineMode = useCallback(
@@ -262,7 +277,23 @@ export function SetupFlow() {
             connection={connection}
             onConnection={setConnection}
             color={offlineColor}
-            onColor={setOfflineColor}
+            onColor={(next) => {
+              setOfflineColor(next);
+              // The chosen colour is always yours: it cannot stay marked empty.
+              setEmptyColors((current) =>
+                current.filter((item) => item !== next),
+              );
+            }}
+            emptyColors={emptyColors}
+            onToggleEmpty={(target, empty) =>
+              setEmptyColors((current) =>
+                empty
+                  ? current.includes(target)
+                    ? current
+                    : [...current, target]
+                  : current.filter((item) => item !== target),
+              )
+            }
             onlineSupported={support.ok}
             onlineUnavailableCopy={
               support.ok ? null : LAN_SUPPORT_COPY[support.reason]
@@ -463,6 +494,8 @@ function CreateStep({
   onConnection,
   color,
   onColor,
+  emptyColors,
+  onToggleEmpty,
   onlineSupported,
   onlineUnavailableCopy,
   onOfflineMode,
@@ -473,6 +506,8 @@ function CreateStep({
   onConnection(next: Connection): void;
   color: ParchisColor;
   onColor(next: ParchisColor): void;
+  emptyColors: readonly ParchisColor[];
+  onToggleEmpty(target: ParchisColor, empty: boolean): void;
   onlineSupported: boolean;
   onlineUnavailableCopy: string | null;
   onOfflineMode(mode: OfflineGameMode): void;
@@ -516,18 +551,17 @@ function CreateStep({
               {BOARD_COLORS.map((option) => {
                 const selected = option === color;
                 return (
-                  <button
+                  <DrawablyButton
                     key={option}
                     type="button"
+                    variant="outline"
+                    stroke={COLOR_ACCENT[option]}
                     aria-pressed={selected}
                     onClick={() => onColor(option)}
-                    className={`flex select-none items-center justify-center gap-1.5 rounded-xl border-2 px-2 py-2 text-xs capitalize ${
+                    className={`flex select-none items-center justify-center gap-1.5 rounded-xl px-2 py-2 text-xs capitalize ${
                       selected ? "font-semibold" : ""
                     }`}
                     style={{
-                      borderColor: selected
-                        ? COLOR_ACCENT[option]
-                        : "transparent",
                       background: selected
                         ? `color-mix(in srgb, ${COLOR_ACCENT[option]} 12%, transparent)`
                         : "transparent",
@@ -539,7 +573,7 @@ function CreateStep({
                     />
                     {COLOR_NAMES[option]}
                     {selected && <span aria-hidden="true">✓</span>}
-                  </button>
+                  </DrawablyButton>
                 );
               })}
             </div>
@@ -573,6 +607,51 @@ function CreateStep({
             }
           />
         </div>
+
+        {connection === "bots" && (
+          <fieldset className="mt-5 border-t border-stone-200 pt-4">
+            <legend className="sr-only">Huecos de la mesa</legend>
+            <p className="text-sm font-medium text-stone-700">
+              Huecos de la mesa
+            </p>
+            <p className="mt-1 text-xs leading-5 text-stone-600">
+              En la mesa de cuatro puedes dejar colores vacíos o llenarlos con
+              bots. Siempre necesitas al menos un rival.
+            </p>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {BOARD_COLORS.map((option) =>
+                option === color ? (
+                  <div key={option} className="flex items-center gap-2">
+                    <span className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-stone-700">
+                      <span
+                        className="h-3 w-3 shrink-0 rounded-full"
+                        style={{ backgroundColor: COLOR_ACCENT[option] }}
+                      />
+                      <span className="truncate">{COLOR_NAMES[option]}</span>
+                    </span>
+                    <span className="w-36 rounded-lg border border-dashed border-stone-300 px-3 py-1.5 text-center text-xs font-semibold text-stone-700">
+                      Tu asiento
+                    </span>
+                  </div>
+                ) : (
+                  <SeatFillPicker
+                    key={option}
+                    color={option}
+                    empty={emptyColors.includes(option)}
+                    canEmpty={
+                      BOARD_COLORS.filter(
+                        (item) =>
+                          item !== color && !emptyColors.includes(item),
+                      ).length > 1
+                    }
+                    onChange={(empty) => onToggleEmpty(option, empty)}
+                  />
+                ),
+              )}
+            </div>
+          </fieldset>
+        )}
       </DrawablyCard>
 
       <div>

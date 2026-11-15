@@ -28,6 +28,12 @@ export interface GameSettings {
   readonly color: ParchisColor;
   readonly name: string;
   readonly avatar: string;
+  /**
+   * Colours of the four-player table left without a seat. Empty seats shrink
+   * the roster (the engine accepts 2–4 players); the human's own colour can
+   * never be listed here.
+   */
+  readonly emptyColors?: readonly ParchisColor[];
 }
 
 export interface GameSetup {
@@ -113,6 +119,7 @@ export const DEFAULT_GAME_SETTINGS: GameSettings = Object.freeze({
   color: "blue",
   name: "Bruno",
   avatar: "/pictures/octupus.png",
+  emptyColors: [],
 });
 
 export function isParchisColor(value: string | null): value is ParchisColor {
@@ -150,14 +157,32 @@ export function getGameSettingsFromSearchParams(
     AVATARS.find((option) => option.image === rawAvatar)?.image ??
     DEFAULT_GAME_SETTINGS.avatar;
 
-  return { mode, color, name, avatar };
+  // `empty=blue,green` leaves those seats unoccupied in a four-player table.
+  // A 1v1 always seats both corners, and the human's colour is never empty.
+  // At most two seats may be removed: the engine needs a second player.
+  const maximumEmpty = BOARD_COLOR_ORDER.length - 2;
+  const emptyColors: ParchisColor[] =
+    mode === "all"
+      ? [
+          ...new Set(
+            (params.get("empty") ?? "")
+              .split(",")
+              .filter(isParchisColor)
+              .filter((item) => item !== color),
+          ),
+        ].slice(0, maximumEmpty)
+      : [];
+
+  return { mode, color, name, avatar, emptyColors };
 }
 
 /**
  * Builds the local roster for a chosen mode and colour. The human is a
  * synthetic profile with id `human`; the other colours use the placeholder
- * bot profiles. Seats are always sorted by the fixed colour order, so the
- * engine's turn order remains blue → red → yellow → green (filtered for 1v1).
+ * bot profiles, except the colours listed in `emptyColors`, which stay
+ * unoccupied so the table seats fewer players. Seats are always sorted by the
+ * fixed colour order, so the engine's turn order remains
+ * blue → red → yellow → green (filtered for 1v1 and for empty colours).
  */
 export function createGameSetup(settings: GameSettings): GameSetup {
   const name = settings.name.trim().slice(0, 24) || "Jugador";
@@ -178,7 +203,23 @@ export function createGameSetup(settings: GameSettings): GameSetup {
       ? [settings.color, OPPOSITE_COLOR[settings.color]]
       : [...BOARD_COLOR_ORDER];
 
-  const seats = requiredColors
+  const emptyColors = settings.emptyColors ?? [];
+
+  const seatedColors = requiredColors.filter(
+    (color) => color === settings.color || !emptyColors.includes(color),
+  );
+
+  // The engine rejects tables with fewer than two seats. Settings objects are
+  // also built by hand in tests and offline callers, so clamp here as well:
+  // the human keeps their colour and the nearest omitted rival returns.
+  if (seatedColors.length < 2) {
+    const rival = requiredColors.find(
+      (color) => color !== settings.color && !seatedColors.includes(color),
+    );
+    if (rival) seatedColors.push(rival);
+  }
+
+  const seats = seatedColors
     .map((color) => {
       if (color === settings.color) return human;
       return GAME_PLAYERS.find((profile) => profile.color === color);

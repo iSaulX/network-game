@@ -197,8 +197,11 @@ class GameSoundEngine {
         this.tone(196, 0.25, 0.25, "triangle", 0.03);
         break;
       case "your-turn":
-        this.tone(659, 0, 0.075, "sine", 0.03);
-        this.tone(880, 0.085, 0.12, "sine", 0.025);
+        // A brighter two-note chime with a soft shimmer tail, so the change of
+        // control is audible over the dice clip.
+        this.tone(659, 0, 0.09, "sine", 0.05);
+        this.tone(988, 0.08, 0.16, "sine", 0.045);
+        this.tone(1319, 0.18, 0.22, "triangle", 0.022);
         break;
     }
   }

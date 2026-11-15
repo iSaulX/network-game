@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { Chip } from "@heroui/react";
 import { DrawablyBadge, DrawablyCard } from "drawably/react";
 import { AvatarVisual } from "@/components/avatar-visual";
 import { COLOR_NAMES } from "@/lib/parchis/board-geometry";
@@ -28,6 +29,10 @@ export function PlayerPanel({
   className,
 }: PlayerPanelProps) {
   const role = human ? (auto ? "Tú (auto)" : "Tú") : remote ? "Rival" : "Bot";
+  // Online rooms fill empty seats with `bot-*` players too, so the id is the
+  // reliable signal even when the other seats are remote humans.
+  const isBot = !human && profile.id.startsWith("bot-");
+  const showsBotChip = isBot || (!human && !remote);
   const style = {
     "--drawably-stroke": profile.accent,
     background: active
@@ -53,10 +58,25 @@ export function PlayerPanel({
           <p className="truncate text-sm font-semibold leading-tight">
             {profile.name}
           </p>
-          <p className="text-[11px] capitalize leading-tight text-stone-600">
-            {COLOR_NAMES[profile.color]}
-            <span className="normal-case"> · {role}</span>
-          </p>
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <p className="text-[11px] capitalize leading-tight text-stone-600">
+              {COLOR_NAMES[profile.color]}
+            </p>
+            {showsBotChip ? (
+              <Chip
+                size="sm"
+                variant="soft"
+                color="default"
+                className="select-none px-1.5 py-0 text-[9px] leading-4"
+              >
+                Bot
+              </Chip>
+            ) : (
+              <p className="text-[11px] leading-tight text-stone-600">
+                · {role}
+              </p>
+            )}
+          </div>
         </div>
 
         {active && (

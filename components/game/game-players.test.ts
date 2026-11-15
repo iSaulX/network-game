@@ -87,6 +87,7 @@ describe("local game setup", () => {
       color: "green",
       name: "Alex",
       avatar: "/pictures/unicorn.png",
+      emptyColors: [],
     });
 
     const defaults = getGameSettingsFromSearchParams(
@@ -97,11 +98,42 @@ describe("local game setup", () => {
       color: "blue",
       name: "Bruno",
       avatar: "/pictures/octupus.png",
+      emptyColors: [],
     });
 
     const longName = getGameSettingsFromSearchParams(
       new URLSearchParams(`name=${"x".repeat(40)}`),
     );
     expect(longName.name).toHaveLength(24);
+  });
+
+  test("empty seats shrink the four-player table but never below two", () => {
+    const parsed = getGameSettingsFromSearchParams(
+      new URLSearchParams("mode=all&color=red&empty=yellow,green"),
+    );
+    expect(parsed.emptyColors).toEqual(["yellow", "green"]);
+
+    const setup = createGameSetup(parsed);
+    expect(setup.seats.map((seat) => seat.color)).toEqual(["blue", "red"]);
+    expect(setup.configs).toHaveLength(2);
+
+    // The human's own colour is ignored, and a 1v1 ignores `empty` entirely.
+    expect(
+      getGameSettingsFromSearchParams(
+        new URLSearchParams("mode=all&color=red&empty=red,blue"),
+      ).emptyColors,
+    ).toEqual(["blue"]);
+    expect(
+      getGameSettingsFromSearchParams(
+        new URLSearchParams("mode=1v1&color=red&empty=green"),
+      ).emptyColors,
+    ).toEqual([]);
+
+    // At most two seats may be removed: the table always keeps a rival.
+    const clamped = getGameSettingsFromSearchParams(
+      new URLSearchParams("mode=all&color=blue&empty=red,yellow,green"),
+    );
+    expect(clamped.emptyColors).toHaveLength(2);
+    expect(createGameSetup(clamped).seats).toHaveLength(2);
   });
 });

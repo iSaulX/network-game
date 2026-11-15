@@ -6,6 +6,7 @@
 @import "@heroui/styles/variants";
 @import "@heroui/styles/themes/default" layer(theme);
 @import "@heroui/styles/components/popover.css" layer(components);
+@import "@heroui/styles/components/chip.css" layer(components);
 
 :root {
   color-scheme: light;
@@ -101,6 +102,47 @@ html .drawably-badge {
 
 @media (prefers-reduced-motion: reduce) {
   .dice-rolling {
+    animation: none;
+  }
+}
+
+/*
+ * Turn glow behind the dice of the seat that may act. The blur lives in a
+ * pseudo-element so the dice artwork itself stays crisp, and the pulse is
+ * suppressed for reduced motion (a static glow remains).
+ */
+@keyframes drawably-turn-glow {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.06);
+  }
+}
+
+.turn-glow::before {
+  content: "";
+  position: absolute;
+  inset: -0.4rem;
+  z-index: 0;
+  border-radius: 1rem;
+  background: var(--turn-glow-color, var(--parchis-yellow));
+  filter: blur(12px);
+  opacity: 0.6;
+  pointer-events: none;
+  animation: drawably-turn-glow 1.8s ease-in-out infinite;
+}
+
+.turn-glow > * {
+  position: relative;
+  z-index: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-glow::before {
     animation: none;
   }
 }

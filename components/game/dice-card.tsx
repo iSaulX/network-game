@@ -107,18 +107,29 @@ export function DiceCard({
     state.phase === "awaiting-roll" &&
     !rolling;
 
+  /** The human may act right now: their turn still belongs to them. */
+  const yourTurn =
+    active &&
+    human &&
+    controllable &&
+    !auto &&
+    state.phase !== "finished";
+
   const style = {
     "--drawably-stroke": active
       ? profile.accent
       : `color-mix(in srgb, ${profile.accent} 42%, #78716c)`,
     "--drawably-width": active ? "2.6" : "1.5",
+    "--turn-glow-color": profile.accent,
     background: active
       ? `color-mix(in srgb, ${profile.accent} 8%, var(--drawably-paper))`
       : undefined,
   } as CSSProperties;
 
   const dice = (
-    <div className="flex items-center justify-center gap-2">
+    <div
+      className={`relative flex items-center justify-center gap-2 ${yourTurn ? "turn-glow" : ""}`}
+    >
       <DieFace
         value={visibleValues[0]}
         used={visibleUsed[0]}
@@ -141,11 +152,15 @@ export function DiceCard({
   const ownerLabel = human ? "Tus dados" : `Dados de ${profile.name}`;
   const status = rolling
     ? "Tirando los dados."
-    : active
-      ? auto
-        ? "Modo automático."
-        : "Turno activo."
-      : "Esperando turno.";
+    : yourTurn
+      ? state.phase === "awaiting-roll"
+        ? "¡Es tu turno! Tira los dados."
+        : "¡Es tu turno! Elige una ficha."
+      : active
+        ? auto
+          ? "Modo automático."
+          : "Turno activo."
+        : "Esperando turno.";
 
   return (
     <DrawablyCard
@@ -176,6 +191,18 @@ export function DiceCard({
             className="px-1.5 py-0 text-[9px]"
           >
             Auto
+          </DrawablyBadge>
+        </div>
+      )}
+
+      {yourTurn && (
+        <div className="mt-1 flex justify-center">
+          <DrawablyBadge
+            variant="scribble"
+            stroke={profile.accent}
+            className="px-1.5 py-0 text-[9px] font-semibold"
+          >
+            {state.phase === "awaiting-roll" ? "¡Tira!" : "Tu turno"}
           </DrawablyBadge>
         </div>
       )}
