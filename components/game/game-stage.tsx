@@ -45,6 +45,7 @@ import type {
   GameState,
   Move,
 } from "@/lib/parchis/types";
+import type { SeatConnection } from "@/lib/party/protocol";
 
 const UNIT_PERCENT = getBoardFrameLayout(100).unit;
 
@@ -100,6 +101,8 @@ export interface GameStageProps {
   readonly playAgain?: (() => void) | null;
   /** Marks the non-human seats as remote rivals rather than bots. */
   readonly remoteHuman?: boolean;
+  /** Per-seat connection mode (direct, STUN or TURN relay). */
+  readonly connections?: Readonly<Record<string, SeatConnection>>;
 }
 
 function HeaderIcon({ src }: { src: string }) {
@@ -312,6 +315,7 @@ export function GameStage({
   banner,
   playAgain = null,
   remoteHuman = false,
+  connections,
 }: GameStageProps) {
   const [menuTokenId, setMenuTokenId] = useState<string | null>(null);
   const [soundMenuOpen, setSoundMenuOpen] = useState(false);
@@ -425,6 +429,7 @@ export function GameStage({
         human={human}
         remote={remoteHuman && !human}
         auto={human && Boolean(autoControl?.checked)}
+        connection={connections?.[profile.id] ?? null}
       />
     );
 

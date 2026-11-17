@@ -21,6 +21,12 @@ export interface SessionDescriptionLike {
   readonly sdp?: string;
 }
 
+/** The slice of `RTCStatsReport` used to find the selected candidate pair. */
+export interface StatsReportLike {
+  forEach(callback: (report: unknown) => void): void;
+  get?(id: string): unknown;
+}
+
 export interface PeerConnectionLike {
   readonly iceGatheringState: "new" | "gathering" | "complete";
   readonly connectionState:
@@ -45,6 +51,8 @@ export interface PeerConnectionLike {
   setLocalDescription(description: SessionDescriptionLike): Promise<void>;
   setRemoteDescription(description: SessionDescriptionLike): Promise<void>;
   addIceCandidate(candidate: unknown): Promise<void>;
+  /** Optional so Bun tests can use structural fakes without WebRTC. */
+  getStats?(): Promise<StatsReportLike>;
   close(): void;
 }
 

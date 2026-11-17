@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createVersusServer,
   isVersusCapacity,
+  MAX_SIGNALS_PER_ROOM,
   normalizeRoomCode,
 } from "./rooms";
 
@@ -149,14 +150,15 @@ describe("versus room store", () => {
     ]);
   });
 
-  test("an addressed signal must name a live seat", () => {
+  test("an addressed signal to a seat that is gone reports PEER_GONE", () => {
     const server = fixedServer(["ABC234"]);
     const host = server.create(4);
     if (!host.ok) throw new Error("room");
 
+    // The seat exists but nobody holds it: a race, not a malformed request.
     expect(server.send(host.value, "offer", "SDP", "guest-3")).toEqual({
       ok: false,
-      error: "BAD_SIGNAL",
+      error: "PEER_GONE",
     });
   });
 
@@ -184,10 +186,11 @@ describe("versus room store", () => {
     expect(otherGuestPoll.value.signals).toHaveLength(0);
   });
 
-  test("caps signal size and payload volume", () => {
+  test("caps signal size and unread payload volume", () => {
     const server = fixedServer(["ABC234"]);
-    const host = server.create();
-    if (!host.ok) throw new Error("room");
+    const host = server.create(4);
+    const guest = server.join("ABC234");
+    if (!host.ok || !guest.ok) throw new Error("room");
 
     expect(server.send(host.value, "offer", "")).toEqual({
       ok: false,
@@ -199,13 +202,123 @@ describe("versus room store", () => {
       error: "BAD_SIGNAL",
     });
 
-    for (let index = 0; index < 64; index += 1) {
+    // The guest never polls, so nothing can be pruned yet: the cap is the
+    // backstop against an unbounded log. One slot is the `joined` note.
+    for (let index = 0; index < MAX_SIGNALS_PER_ROOM - 1; index += 1) {
       expect(server.send(host.value, "offer", `sdp-${index}`).ok).toBeTrue();
     }
 
     expect(server.send(host.value, "offer", "one-more")).toEqual({
       ok: false,
       error: "TOO_MANY_SIGNALS",
+    });
+  });
+
+  test("read signals are pruned so a long lobby never fills the room", () => {
+    const server = fixedServer(["ABC234"]);
+    const host = server.create(2);
+    if (!host.ok) throw new Error("room");
+
+    // Far more join/leave cycles than MAX_SIGNALS_PER_ROOM would allow if the
+    // log were never pruned.
+    let hostSeq = 0;
+
+    for (let index = 0; index < 40; index += 1) {
+      const guest = server.join("ABC234");
+      if (!guest.ok) throw new Error(`join ${index}`);
+
+      const hostPoll = server.poll(host.value, hostSeq);
+      if (!hostPoll.ok) throw new Error("host poll");
+      hostSeq = hostPoll.value.seq;
+
+      expect(
+        server.send(host.value, "offer", `OFFER-${index}`, guest.value.id).ok,
+      ).toBeTrue();
+
+      const guestPoll = server.poll(guest.value, 0);
+      if (!guestPoll.ok) throw new Error("guest poll");
+      expect(guestPoll.value.signals.map((signal) => signal.payload)).toEqual([
+        `OFFER-${index}`,
+      ]);
+
+      // Both peers advance past everything, then the seat leaves.
+      server.poll(guest.value, guestPoll.value.seq);
+      server.leave(guest.value);
+
+      const leftPoll = server.poll(host.value, hostSeq);
+      if (!leftPoll.ok) throw new Error("host poll after leave");
+      hostSeq = leftPoll.value.seq;
+    }
+
+    const last = server.join("ABC234");
+    if (!last.ok) throw new Error("last join");
+    expect(server.send(host.value, "offer", "FINAL", last.value.id).ok).toBeTrue();
+  });
+
+  test("a reused seat never replays the previous occupant's signals", () => {
+    const server = fixedServer(["ABC234"]);
+    const host = server.create(2);
+    const first = server.join("ABC234");
+    if (!host.ok || !first.ok) throw new Error("room");
+
+    server.send(host.value, "offer", "OLD-OFFER", first.value.id);
+    server.leave(first.value);
+
+    const second = server.join("ABC234");
+    if (!second.ok) throw new Error("rejoin");
+
+    // The host has not polled between the leave and the rejoin: the old offer
+    // must not be delivered to the new occupant of `guest-1`.
+    const polled = server.poll(second.value, 0);
+    if (!polled.ok) throw new Error("poll");
+    expect(polled.value.signals).toHaveLength(0);
+
+    server.send(host.value, "offer", "NEW-OFFER", second.value.id);
+    const after = server.poll(second.value, 0);
+    if (!after.ok) throw new Error("poll");
+    expect(after.value.signals.map((signal) => signal.payload)).toEqual([
+      "NEW-OFFER",
+    ]);
+  });
+
+  test("a seat that joined and left in one window leaves no stale answer", () => {
+    const server = fixedServer(["ABC234"]);
+    const host = server.create(2);
+    const guest = server.join("ABC234");
+    if (!host.ok || !guest.ok) throw new Error("room");
+
+    // The guest answers, then leaves before the host polls.
+    server.send(guest.value, "answer", "ANSWER", "host");
+    server.leave(guest.value);
+
+    const next = server.join("ABC234");
+    if (!next.ok) throw new Error("rejoin");
+
+    const hostPoll = server.poll(host.value, 0);
+    if (!hostPoll.ok) throw new Error("poll");
+    // The host sees the new join but never the departed guest's answer.
+    expect(
+      hostPoll.value.signals.map((signal) => [signal.kind, signal.payload]),
+    ).toEqual([["joined", ""]]);
+  });
+
+  test("the host can refuse joins once the match started", () => {
+    const server = fixedServer(["ABC234"]);
+    const host = server.create(4);
+    const guest = server.join("ABC234");
+    if (!host.ok || !guest.ok) throw new Error("room");
+
+    expect(server.markStarted(guest.value)).toEqual({
+      ok: false,
+      error: "UNAUTHORIZED",
+    });
+    expect(server.markStarted(host.value).ok).toBeTrue();
+
+    // A guest already inside is unaffected; a new one fails immediately.
+    expect(server.poll(guest.value, 0).ok).toBeTrue();
+    expect(server.join("ABC234")).toEqual({
+      ok: false,
+      error: "ROOM_STARTED",
     });
   });
 

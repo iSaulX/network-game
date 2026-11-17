@@ -16,7 +16,7 @@ Scope: the **network** only. Game rules, rendering and UI are out of scope.
 | Transport of gameplay | WebRTC `RTCDataChannel` over SCTP/DTLS/UDP | Carries every game message between peers |
 | Signaling | Plain HTTP long-poll (`POST`/`GET /api/versus`) | Relays SDP descriptions and presence so peers can find each other |
 | Alternative: server-authoritative | WebSocket (planned, not implemented) | Central game loop; clients send intents, server broadcasts state |
-| NAT traversal | ICE + STUN, no TURN | Discovers a usable path; fails loudly when none exists |
+| NAT traversal | ICE + STUN + Cloudflare TURN | Discovers a usable path; TURN relays when direct/STUN fails |
 | Identity | 6-character room code + 64-hex per-peer token | Room lookup and per-peer authentication |
 
 The implemented architecture is **peer-to-peer with a host-authoritative
@@ -101,22 +101,40 @@ Parchís Stars uses `stun:stun.cloudflare.com:3478` when `navigator.onLine` is
 true, and **no ICE servers at all** when offline (an offline peer cannot reach a
 STUN server anyway, and a LAN-only match should not wait on one).
 
-### 3.4 TURN (deliberately absent)
+### 3.4 TURN (Cloudflare Realtime)
 
 **TURN** is a relay: when hole punching fails, both peers connect to the TURN
 server, which forwards packets between them. It works through almost every NAT,
-at the cost of bandwidth, latency and a server.
+at the cost of bandwidth, latency and a relay service.
 
-Parchís Stars **does not use TURN** and has **no silent fallback**. This is an
-explicit product decision:
+Parchís Stars uses **Cloudflare Realtime TURN** as the last ICE candidate type.
+It is not a separate transport and it does not change the authority model: the
+data channel still runs peer-to-peer logically, with TURN relaying the packets.
 
-- No relay server to run, secure and pay for.
-- No central processor of game traffic, which keeps the privacy story simple.
-- Failures are visible: the UI shows a Spanish message and a retry instead of
-  degrading anonymously.
+Credentials are **short-lived and minted server-side**:
+
+1. The browser calls `GET /api/ice` (same origin).
+2. The route handler asks Cloudflare's
+   `POST /v1/turn/keys/{tokenId}/credentials/generate-ice-servers` with the
+   `Authorization: Bearer <API token>` header and a one-hour TTL.
+3. The validated `{ iceServers }` list is cached for 30 minutes and returned.
+4. The API token stays in the server process; only the expiring
+   username/credential reach the browser.
+
+If the env vars are missing, Cloudflare is down, or the payload is malformed,
+the route returns a **STUN-only** list. Online play keeps working without relay
+instead of failing. The static desktop export has no route handler, so it also
+gets the STUN-only path from the client fallback.
+
+The UI makes the selected path visible: after the channel opens, the host reads
+the nominated candidate pair from `getStats()` and broadcasts each seat's
+candidate type (`host`, `srflx`/`prflx`, `relay`). The lobby and the in-game
+player panels show "Conexión directa · host/STUN" or "Conexión por TURN · relay"
+under the player. A relayed match is therefore never silent.
 
 Consequence: symmetric NATs, restrictive corporate firewalls and networks with
-client isolation can fail. Friends on typical home or mobile networks succeed.
+client isolation still can fail, but only when TURN itself is unreachable or
+blocked (for example, a network that blocks TCP 443 as well).
 
 ### 3.5 ICE and UDP hole punching
 
@@ -126,7 +144,7 @@ It works in four conceptual steps:
 1. **Gather candidates.** Each peer collects:
    - **host** candidates: local IPs/interfaces;
    - **server-reflexive** candidates: public mapping from STUN;
-   - **relay** candidates: from TURN (none here).
+   - **relay** candidates: from TURN (Cloudflare, minted per session).
 2. **Exchange candidates.** Candidates travel in the SDP (or incrementally
    via `onicecandidate`).
 3. **Connectivity checks.** Each peer sends STUN binding requests to every
@@ -365,7 +383,7 @@ audit, no ranked play. This mode is for friends.
 
 ## 7. Wire protocol
 
-Protocol version **2**. Every message is JSON; every inbound message is
+Protocol version **4**. Every message is JSON; every inbound message is
 structurally validated. Inbound messages are capped at **64 KB**; outbound
 sends throw above 1 MB of `bufferedAmount` (backpressure guard).
 
@@ -373,11 +391,16 @@ sends throw above 1 MB of `bufferedAmount` (backpressure guard).
 | --- | --- | --- |
 | `HELLO` | guest → host | `protocol`, `player {id,name,avatar}` |
 | `ACTION` | guest → host | `version`, `action`, `requestId` |
-| `LOBBY` | host → guests | `mode`, `players[]` |
-| `START` | host → guests | `version`, `roster {players[]}`, `state` |
+| `LOBBY` | host → guests | `mode`, `players[]`, `emptySeats[]` |
+| `START` | host → guests | `version`, `mode`, `roster {players[]}`, `state` |
 | `STATE` | host → guests | `version`, `state`, `events[]` |
 | `ERROR` | host → guest | `version`, `code`, `message`, optional `state` |
+| `CONNECTION` | host → guests | `connections: { seatId: { transport, candidate } }` |
 | `BYE` | host → guests | `reason` |
+
+`CONNECTION` is how the selected ICE path is shared: `transport` is `webrtc`
+(or `memory` in tests) and `candidate` is `host`, `srflx`, `prflx`, `relay` or
+`unknown`. The map has at most four entries and every key must be a human seat.
 
 Validation rules worth highlighting:
 
@@ -473,12 +496,24 @@ A server-authoritative loop needs:
 
 ### 9.4 Why WebSocket is *not* used for signaling today
 
-Next.js route handlers cannot perform an HTTP upgrade. A WebSocket server
-requires a custom Node process (`server.ts`) with `next` and `ws` together, or
-a managed service. The HTTP long-poll keeps the current deployment simple. If a
-WebSocket server exists for the authoritative mode, it could also replace
-signaling later — the signaling payloads are small and the peer connection
-logic would not change.
+Next.js route handlers cannot perform an HTTP upgrade on their own. Vercel
+Functions now expose `upgradeWebSocket()` from `@vercel/functions` (with `ws`),
+so a route handler can host sockets in production. That path still has three
+costs for this app:
+
+- a connection is pinned to one function instance, and players of a room may
+  land on different instances, so rooms need an external store (Redis) for
+  presence and routing;
+- connections close at the function's maximum duration (300 s on Hobby, 800 s
+  on Pro), so every client needs reconnect logic mid-match;
+- local development requires `vc dev` rather than `next dev`.
+
+TURN solves the same underlying problem (a peer that cannot be reached
+directly) without moving gameplay to the server: the data channel and the
+host-authoritative session stay exactly the same, and the relay is transparent
+to the protocol. That is why this revision uses Cloudflare TURN instead of a
+WebSocket relay. A server-authoritative WebSocket mode remains possible later
+and would reuse `GameTransport`/`GameSession`.
 
 ---
 
@@ -497,7 +532,7 @@ silently degrades into another mode.
 | `room-full` | No free seat | Room is complete |
 | `room-closed` | Host left | Match ended |
 | `bad-code` | Not 6 characters | Correct the code |
-| `ice-failed` | No working candidate pair (symmetric NAT, firewall) | Explains that some networks block direct connections |
+| `ice-failed` | No working candidate pair, including TURN (blocked network, TURN unreachable) | Explains that some networks block direct and relayed connections |
 | `timeout` | 20 s without a data channel | Retry |
 | `host-left` | Host disconnected | Match ended |
 | `peer-left` | A guest disconnected | Play continues with the host controlling the seat |
@@ -551,7 +586,12 @@ short enough that a user is not left staring at a spinner.
 | `lib/party/session.ts` | Abstract `GameSession` + `SessionSnapshot` |
 | `lib/party/authority.ts` | Actor/turn/version/phase validation, versioning, rate limiter |
 | `lib/party/webrtc/signaling.ts` | Non-trickle ICE, STUN selection, offer/answer, channel wait |
+| `lib/party/webrtc/ice.ts` | Fetches `/api/ice`, validates the list, falls back to STUN |
+| `lib/party/webrtc/connection.ts` | Reads the nominated candidate pair (`host`/`srflx`/`relay`) |
 | `lib/party/webrtc/peer-connection.ts` | `RTCPeerConnection` → `GameTransport` adapter |
+| `lib/party/connection-copy.ts` | Spanish copy for the per-seat connection mode |
+| `lib/server/versus/turn.ts` | Server-only Cloudflare TURN credential minting |
+| `app/api/ice/route.ts` | `GET /api/ice`; caches credentials, never exposes the API token |
 | `lib/party/webrtc/support.ts` | Secure-context and API screening |
 | `lib/party/sessions/webrtc-host-session.ts` | Authoritative host: one transport per guest, bots |
 | `lib/party/sessions/webrtc-guest-session.ts` | Intent sender, snapshot adopter |
@@ -575,7 +615,14 @@ short enough that a user is not left staring at a spinner.
 - **Negotiation**: SDP relayed through the HTTP contract, plus the same match
   over the memory transport and a fake WebRTC transport (identical results).
 - **Signaling**: capacity 2/4, seat assignment, targeted delivery, presence,
-  full/unknown rooms, malformed server responses.
+  full/unknown rooms, malformed server responses, seat reuse (no stale SDP),
+  signal pruning, `PEER_GONE` on a departed seat, `ROOM_STARTED` on a late join.
+- **TURN**: credential minting with a fake Cloudflare fetch (valid payload,
+  TURN-less STUN entry, HTTP error, network error, malformed payload, TTL
+  clamp), and the browser fallback to STUN.
+- **Connection mode**: selected candidate pair from fake `getStats()` reports
+  (transport report, nominated pair, unknown type, retry while nominating) and
+  the host → guest `CONNECTION` broadcast.
 
 No test opens a real peer connection to a remote host; the structural fakes
 prove the logic, and browser checks prove the wiring.
@@ -584,9 +631,9 @@ prove the logic, and browser checks prove the wiring.
 
 ## 15. Open questions and future work
 
-- **TURN**: intentionally absent. Adding it means a server, credentials and a
-  cost model; the failure UX already tells users when a network blocks direct
-  connections.
+- **TURN**: implemented through Cloudflare Realtime with short-lived,
+  server-minted credentials. The remaining cost is Cloudflare bandwidth when a
+  match is relayed; the UI shows when that happens.
 - **WebSocket signaling**: an alternative once a custom Node server exists.
   It would remove polling but not change ICE or the session layer.
 - **Server-authoritative mode**: planned; the transport and session

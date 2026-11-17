@@ -55,7 +55,21 @@ function serverFetch(server: VersusServer): typeof fetch {
           if (sent.ok) {
             return Response.json({ ok: true, ...sent.value });
           }
-          return Response.json({ ok: false, error: sent.error }, { status: 401 });
+          const status =
+            sent.error === "UNAUTHORIZED"
+              ? 401
+              : sent.error === "BAD_SIGNAL"
+                ? 400
+                : 409;
+          return Response.json({ ok: false, error: sent.error }, { status });
+        }
+        case "start": {
+          const started = server.markStarted(credentials);
+          if (started.ok) {
+            return Response.json({ ok: true });
+          }
+          const status = started.error === "UNAUTHORIZED" ? 401 : 409;
+          return Response.json({ ok: false, error: started.error }, { status });
         }
         case "leave": {
           server.leave(credentials);
@@ -199,6 +213,41 @@ describe("versus signaling client", () => {
     const repeat = await guestClient.poll();
     if (!repeat.ok) throw new Error("poll");
     expect(repeat.value.signals).toHaveLength(0);
+  });
+
+  test("a started match refuses new guests with a distinct failure", async () => {
+    const fetcher = serverFetch(fixedServer());
+    const created = await createVersusRoom(2, { fetcher });
+    if (!created.ok) throw new Error("room");
+
+    const joined = await joinVersusRoom(created.value.code, { fetcher });
+    if (!joined.ok) throw new Error("room");
+
+    const hostClient = new VersusSignalingClient(created.value, { fetcher });
+    await hostClient.markStarted();
+
+    expect(await joinVersusRoom(created.value.code, { fetcher })).toEqual({
+      ok: false,
+      failure: "room-started",
+    });
+  });
+
+  test("an offer to a seat that already left reports peer-gone", async () => {
+    const fetcher = serverFetch(fixedServer());
+    const created = await createVersusRoom(2, { fetcher });
+    if (!created.ok) throw new Error("room");
+
+    const joined = await joinVersusRoom(created.value.code, { fetcher });
+    if (!joined.ok) throw new Error("room");
+
+    const hostClient = new VersusSignalingClient(created.value, { fetcher });
+    const guestClient = new VersusSignalingClient(joined.value, { fetcher });
+
+    await guestClient.leave();
+
+    expect(
+      await hostClient.send("offer", "SDP", joined.value.id),
+    ).toEqual({ ok: false, failure: "peer-gone" });
   });
 
   test("a network failure is reported, not thrown", async () => {

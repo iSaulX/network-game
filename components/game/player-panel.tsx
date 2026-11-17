@@ -3,6 +3,8 @@ import { Chip } from "@heroui/react";
 import { DrawablyBadge, DrawablyCard } from "drawably/react";
 import { AvatarVisual } from "@/components/avatar-visual";
 import { COLOR_NAMES } from "@/lib/parchis/board-geometry";
+import { describeSeatConnection } from "@/lib/party/connection-copy";
+import type { SeatConnection } from "@/lib/party/protocol";
 import type { GamePlayerProfile } from "./game-players";
 
 export interface PlayerPanelProps {
@@ -15,6 +17,8 @@ export interface PlayerPanelProps {
   remote?: boolean;
   /** The human's seat is currently played by the auto bot. */
   auto?: boolean;
+  /** How this seat is connected (direct, STUN or TURN relay). */
+  connection?: SeatConnection | null;
   className?: string;
 }
 
@@ -26,9 +30,11 @@ export function PlayerPanel({
   human,
   remote = false,
   auto = false,
+  connection = null,
   className,
 }: PlayerPanelProps) {
   const role = human ? (auto ? "Tú (auto)" : "Tú") : remote ? "Rival" : "Bot";
+  const connectionCopy = describeSeatConnection(connection);
   // Online rooms fill empty seats with `bot-*` players too, so the id is the
   // reliable signal even when the other seats are remote humans.
   const isBot = !human && profile.id.startsWith("bot-");
@@ -44,7 +50,7 @@ export function PlayerPanel({
     <DrawablyCard
       className={`select-none p-3 ${className ?? ""}`}
       style={style}
-      aria-label={`${profile.name}${human ? (auto ? ", tú, modo automático" : ", tú") : remote ? ", rival" : ", bot"}, color ${COLOR_NAMES[profile.color]}${active ? ", en turno" : ""}${winner ? ", ganador" : ""}.`}
+      aria-label={`${profile.name}${human ? (auto ? ", tú, modo automático" : ", tú") : remote ? ", rival" : ", bot"}, color ${COLOR_NAMES[profile.color]}${connectionCopy ? `, ${connectionCopy}` : ""}${active ? ", en turno" : ""}${winner ? ", ganador" : ""}.`}
     >
       <div className="flex items-center gap-2.5">
         <span
@@ -77,6 +83,11 @@ export function PlayerPanel({
               </p>
             )}
           </div>
+          {connectionCopy && (
+            <p className="truncate text-[10px] leading-tight text-stone-500">
+              {connectionCopy}
+            </p>
+          )}
         </div>
 
         {active && (

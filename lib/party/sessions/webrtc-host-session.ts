@@ -15,12 +15,14 @@ import {
 } from "../authority";
 import {
   isBotId,
+  isGuestId,
   PARTY_PROTOCOL_VERSION,
   type ClientAction,
   type GameMode,
   type LanPlayerInfo,
   type LanRoster,
   type PlayerId,
+  type SeatConnection,
   type WireMessage,
 } from "../protocol";
 import {
@@ -90,6 +92,7 @@ export class WebRTCHostSession extends GameSession {
   private events: readonly GameEvent[] = [];
   private lobby: readonly LanPlayerInfo[] = [];
   private emptySeats: readonly string[] = [];
+  private connections: Readonly<Record<string, SeatConnection>> = {};
   private roster: LanRoster | null = null;
   private disconnected: readonly string[] = [];
   private disposed = false;
@@ -128,6 +131,7 @@ export class WebRTCHostSession extends GameSession {
       roster: this.roster,
       disconnected: this.disconnected,
       mode: this.mode,
+      connections: this.connections,
     };
   }
 
@@ -227,6 +231,35 @@ export class WebRTCHostSession extends GameSession {
 
     this.emptySeats = next;
     this.broadcastLobby();
+    this.notifier.emit(this.snapshot);
+  }
+
+  /**
+   * Records the ICE path a seat is using. The host learns each guest's pair
+   * from its own peer connection and broadcasts the map so every screen shows
+   * the same connection mode under each player.
+   */
+  setSeatConnection(seatId: string, connection: SeatConnection): void {
+    if (this.disposed) {
+      return;
+    }
+
+    if (seatId !== "host" && !isGuestId(seatId)) {
+      return;
+    }
+
+    const previous = this.connections[seatId];
+
+    if (
+      previous &&
+      previous.transport === connection.transport &&
+      previous.candidate === connection.candidate
+    ) {
+      return;
+    }
+
+    this.connections = { ...this.connections, [seatId]: connection };
+    this.broadcastConnections();
     this.notifier.emit(this.snapshot);
   }
 
@@ -445,6 +478,13 @@ export class WebRTCHostSession extends GameSession {
       this.broadcastLobby();
     }
 
+    // A late guest needs the connection map too, not only the lobby.
+    this.sendTo(playerId, {
+      type: "CONNECTION",
+      protocol: PARTY_PROTOCOL_VERSION,
+      connections: this.connections,
+    });
+
     this.notifier.emit(this.snapshot);
   }
 
@@ -478,6 +518,13 @@ export class WebRTCHostSession extends GameSession {
     this.peers.delete(playerId);
     peer.unsubscribe();
     peer.unsubscribeStatus();
+
+    if (playerId in this.connections) {
+      const next = { ...this.connections };
+      delete next[playerId];
+      this.connections = next;
+      this.broadcastConnections();
+    }
 
     if (this.game && this.game.players.some((item) => item.id === playerId)) {
       // Mid-match loss: the seat stays, but the host plays for it.
@@ -579,6 +626,18 @@ export class WebRTCHostSession extends GameSession {
       mode: this.mode,
       players: this.lobby,
       emptySeats: this.emptySeats,
+    };
+
+    for (const peer of this.peers.values()) {
+      this.sendRaw(peer, message);
+    }
+  }
+
+  private broadcastConnections(): void {
+    const message: WireMessage = {
+      type: "CONNECTION",
+      protocol: PARTY_PROTOCOL_VERSION,
+      connections: this.connections,
     };
 
     for (const peer of this.peers.values()) {

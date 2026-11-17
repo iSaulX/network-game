@@ -1048,6 +1048,7 @@ function LobbyStep({
                 isHost={seatId === "host"}
                 player={player}
                 empty={empty}
+                connection={party.snapshot?.connections[seatId] ?? null}
                 action={
                   editable ? (
                     <SeatFillPicker

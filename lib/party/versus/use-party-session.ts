@@ -37,10 +37,11 @@ import {
   acceptHostAnswer,
   acceptHostOffer,
   createHostOffer,
-  selectIceServers,
   waitForDataChannel,
   type PairingDescription,
 } from "@/lib/party/webrtc/signaling";
+import { fetchIceServers } from "@/lib/party/webrtc/ice";
+import { waitForSelectedCandidatePair } from "@/lib/party/webrtc/connection";
 import {
   createWebRTCTransport,
   type WebRTCTransport,
@@ -93,8 +94,14 @@ function mapClientFailure(failure: VersusClientFailure): LobbyFailure {
       return "room-full";
     case "room-closed":
       return "room-closed";
+    case "room-started":
+      return "room-started";
     case "bad-request":
-      return "bad-code";
+      // A malformed signaling request is never the user's typed code; the
+      // join form validates the length before calling the server.
+      return "protocol-error";
+    case "peer-gone":
+    case "too-many-signals":
     case "unauthorized":
     case "server-error":
     case "network":
@@ -105,6 +112,8 @@ function mapClientFailure(failure: VersusClientFailure): LobbyFailure {
 interface PendingOffer {
   readonly pc: PeerConnectionLike;
   readonly channel: DataChannelLike;
+  /** Pairing id of the offer; answers for an older offer are ignored. */
+  readonly offerId: string;
 }
 
 interface Negotiation {
@@ -133,9 +142,11 @@ export function usePartySession(
   const offersRef = useRef<Map<string, PendingOffer>>(new Map());
   /** Host side: live guest transports, so they can be closed on leave. */
   const guestTransportsRef = useRef<Map<string, WebRTCTransport>>(new Map());
-  /** Guest side: the single negotiation in progress. */
+  /** Guest side: the negotiation in progress. */
   const negotiationRef = useRef<Negotiation | null>(null);
-  const guestHandledRef = useRef(false);
+  /** Id of the newest offer seen; a later offer supersedes an older one. */
+  const guestOfferIdRef = useRef<string | null>(null);
+  const guestConnectedRef = useRef(false);
 
   const profile = useMemo<LanPlayerInfo>(
     () => ({
@@ -203,7 +214,8 @@ export function usePartySession(
     hostRef.current = null;
     negotiationRef.current?.pc.close();
     negotiationRef.current = null;
-    guestHandledRef.current = false;
+    guestOfferIdRef.current = null;
+    guestConnectedRef.current = false;
     const client = clientRef.current;
     clientRef.current = null;
     credentialsRef.current = null;
@@ -280,7 +292,7 @@ export function usePartySession(
       try {
         const offer = await createHostOffer({
           pcFactory: factory,
-          iceServers: selectIceServers({ online: navigator.onLine }),
+          iceServers: await fetchIceServers({ online: navigator.onLine }),
         });
 
         if (unmountedRef.current) {
@@ -291,6 +303,7 @@ export function usePartySession(
         offersRef.current.set(guestId, {
           pc: offer.pc,
           channel: offer.channel,
+          offerId: offer.description.id,
         });
 
         const sent = await client.send(
@@ -300,6 +313,14 @@ export function usePartySession(
         );
 
         if (!sent.ok) {
+          if (sent.failure === "peer-gone") {
+            // The seat left between the poll and the offer. Drop it; the
+            // lobby must survive a guest that joined and left immediately.
+            offersRef.current.delete(guestId);
+            offer.pc.close();
+            return;
+          }
+
           fail(mapClientFailure(sent.failure));
         }
       } catch {
@@ -317,7 +338,9 @@ export function usePartySession(
     ): Promise<void> => {
       const pending = offersRef.current.get(guestId);
 
-      if (!pending) {
+      // An answer for a superseded offer must not be applied to the current
+      // one; the seat may have changed hands while the offer was in flight.
+      if (!pending || description.id !== pending.offerId) {
         return;
       }
 
@@ -337,6 +360,23 @@ export function usePartySession(
         });
         guestTransportsRef.current.set(guestId, transport);
         hostRef.current?.joinPeer({ playerId: guestId, transport });
+
+        // Once ICE nominates a pair, publish the actual path (host, STUN or
+        // TURN relay) so every screen can show it under the player.
+        void waitForSelectedCandidatePair(pending.pc).then((pair) => {
+          if (!pair || unmountedRef.current) {
+            return;
+          }
+
+          hostRef.current?.setSeatConnection(guestId, {
+            transport: "webrtc",
+            candidate: pair.remote,
+          });
+          hostRef.current?.setSeatConnection("host", {
+            transport: "webrtc",
+            candidate: pair.local,
+          });
+        });
       } catch {
         // Another guest's connection failing must not end the lobby.
         pending.pc.close();
@@ -367,10 +407,21 @@ export function usePartySession(
     async (
       client: VersusSignalingClient,
       signals: readonly VersusSignal[],
+      presentGuests: readonly string[],
     ): Promise<void> => {
+      // Presence is the final truth for this poll: a seat that joined and
+      // left inside the same window must not receive an offer.
+      const present = new Set(presentGuests);
+
       for (const signal of signals) {
         if (signal.kind === "joined") {
-          await offerTo(client, signal.from);
+          if (present.has(signal.from)) {
+            // A seat may be reused, and an offer created for a previous
+            // occupant may have been purged. Always renegotiate; the guest
+            // lets the newest offer win.
+            dropGuest(signal.from);
+            await offerTo(client, signal.from);
+          }
           continue;
         }
 
@@ -379,7 +430,7 @@ export function usePartySession(
           continue;
         }
 
-        if (signal.kind === "answer") {
+        if (signal.kind === "answer" && present.has(signal.from)) {
           const description = decodeDescription(signal.payload);
 
           if (!description || description.kind !== "answer") {
@@ -426,10 +477,25 @@ export function usePartySession(
       signal: VersusSignal,
       description: PairingDescription,
     ): Promise<void> => {
-      if (guestHandledRef.current) {
+      if (guestConnectedRef.current) {
         return;
       }
-      guestHandledRef.current = true;
+
+      const offerId = description.id;
+
+      // The same offer can be delivered twice after a poll retry.
+      if (guestOfferIdRef.current === offerId) {
+        return;
+      }
+
+      // A newer offer supersedes any negotiation still waiting for its
+      // channel. The host re-offers when a seat changes hands, so the latest
+      // offer is always the one that must win.
+      guestOfferIdRef.current = offerId;
+      negotiationRef.current?.pc.close();
+      negotiationRef.current = null;
+
+      const superseded = () => guestOfferIdRef.current !== offerId;
 
       const factory = defaultPeerConnectionFactory();
 
@@ -441,10 +507,10 @@ export function usePartySession(
       try {
         const answer = await acceptHostOffer(description, {
           pcFactory: factory,
-          iceServers: selectIceServers({ online: navigator.onLine }),
+          iceServers: await fetchIceServers({ online: navigator.onLine }),
         });
 
-        if (unmountedRef.current) {
+        if (unmountedRef.current || superseded()) {
           answer.pc.close();
           return;
         }
@@ -464,7 +530,10 @@ export function usePartySession(
 
         const channel = await waitForDataChannel(answer.pc);
 
-        if (unmountedRef.current) return;
+        if (unmountedRef.current || superseded()) {
+          answer.pc.close();
+          return;
+        }
 
         negotiationRef.current = { pc: answer.pc, channel };
 
@@ -477,16 +546,39 @@ export function usePartySession(
           await transport.connect();
         }
 
-        if (unmountedRef.current) {
+        if (unmountedRef.current || superseded()) {
           transport.close();
           return;
         }
 
+        guestConnectedRef.current = true;
         clearPoll();
         clearConnectTimeout();
         attachGuestSession(transport);
+
+        const credentials = credentialsRef.current;
+
+        void waitForSelectedCandidatePair(answer.pc).then((pair) => {
+          if (!pair || unmountedRef.current || !credentials) {
+            return;
+          }
+
+          const current = sessionRef.current;
+          current?.setSeatConnection(credentials.id, {
+            transport: "webrtc",
+            candidate: pair.local,
+          });
+          current?.setSeatConnection("host", {
+            transport: "webrtc",
+            candidate: pair.remote,
+          });
+        });
       } catch {
-        fail("ice-failed");
+        // A superseded negotiation is expected to fail; only the offer that
+        // is still current may surface an error.
+        if (!superseded()) {
+          fail("ice-failed");
+        }
       }
     },
     [attachGuestSession, clearConnectTimeout, clearPoll, fail],
@@ -518,13 +610,19 @@ export function usePartySession(
         }
 
         if (role === "host") {
-          await handleHostSignal(client, polled.value.signals);
+          await handleHostSignal(
+            client,
+            polled.value.signals,
+            polled.value.present.guests,
+          );
         } else {
           for (const signal of polled.value.signals) {
             if (signal.kind === "offer") {
               const description = decodeDescription(signal.payload);
               if (description && description.kind === "offer") {
-                await acceptHostOfferSignal(client, signal, description);
+                // Do not block the poll while waiting for the data channel:
+                // a newer offer must be able to supersede this one.
+                void acceptHostOfferSignal(client, signal, description);
               }
             } else if (signal.kind === "bye") {
               fail("host-left");
@@ -563,6 +661,10 @@ export function usePartySession(
         fail("offline");
         return;
       }
+
+      // Warm the credential request while the room is being created, so the
+      // first offer does not wait for it.
+      void fetchIceServers({ online: navigator.onLine });
 
       void (async () => {
         const created = await createVersusRoom(capacityForMode(mode));
@@ -622,6 +724,8 @@ export function usePartySession(
         return;
       }
 
+      void fetchIceServers({ online: navigator.onLine });
+
       void (async () => {
         // A room created a moment ago may not be listed yet; retry briefly.
         for (let attempt = 0; attempt < JOIN_RETRY_LIMIT; attempt += 1) {
@@ -663,6 +767,9 @@ export function usePartySession(
 
   const startGame = useCallback(() => {
     feedback.start();
+    // Tell the signaling server the roster is frozen. A guest who tries to
+    // join later fails immediately instead of waiting for the 20 s timeout.
+    void clientRef.current?.markStarted();
     hostRef.current?.start();
   }, [feedback]);
 

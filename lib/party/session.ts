@@ -4,6 +4,7 @@ import type {
   LanPlayerInfo,
   LanRoster,
   PartyErrorCode,
+  SeatConnection,
 } from "./protocol";
 import type { TransportKind } from "./transport";
 
@@ -36,6 +37,11 @@ export interface SessionSnapshot {
   /** Seats whose connection dropped mid-match (their turn is played by a bot). */
   readonly disconnected: readonly string[];
   readonly mode: GameMode;
+  /**
+   * How each human seat is connected (direct, STUN or TURN relay). The host
+   * knows every guest; a guest also receives the host's map over the wire.
+   */
+  readonly connections: Readonly<Record<string, SeatConnection>>;
 }
 
 export type SessionListener = (snapshot: SessionSnapshot) => void;
@@ -53,6 +59,8 @@ export abstract class GameSession {
   abstract start(): void;
   /** Host only: leaves a seat unoccupied (no bot) or fills it again. */
   abstract setSeatEmpty(seatId: string, empty: boolean): void;
+  /** Records how a seat is connected so every screen can show it. */
+  abstract setSeatConnection(seatId: string, connection: SeatConnection): void;
   abstract roll(): void;
   abstract move(move: Move): void;
   abstract bonusMove(move: BonusMove): void;

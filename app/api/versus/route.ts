@@ -80,6 +80,8 @@ function storeErrorStatus(error: VersusStoreError): number {
       return 404;
     case "ROOM_FULL":
     case "ROOM_CLOSED":
+    case "ROOM_STARTED":
+    case "PEER_GONE":
     case "TOO_MANY_SIGNALS":
       return 409;
     case "UNAUTHORIZED":
@@ -188,6 +190,24 @@ export async function POST(request: Request) {
 
       if (!left.ok) {
         return errorResponse(storeErrorStatus(left.error), left.error);
+      }
+
+      return okResponse({});
+    }
+
+    case "start": {
+      if (!isCredentialsBody(record)) {
+        return errorResponse(400, "BAD_SIGNAL");
+      }
+
+      const started = server.markStarted({
+        code: normalizeRoomCode(record.code),
+        id: record.id,
+        token: record.token,
+      });
+
+      if (!started.ok) {
+        return errorResponse(storeErrorStatus(started.error), started.error);
       }
 
       return okResponse({});

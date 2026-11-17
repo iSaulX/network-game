@@ -76,6 +76,14 @@ describe("wire protocol", () => {
         state: STATE,
       },
       {
+        type: "CONNECTION",
+        protocol: PARTY_PROTOCOL_VERSION,
+        connections: {
+          host: { transport: "webrtc", candidate: "host" },
+          "guest-1": { transport: "webrtc", candidate: "relay" },
+        },
+      },
+      {
         type: "BYE",
         protocol: PARTY_PROTOCOL_VERSION,
         reason: "host-closed",
@@ -140,6 +148,37 @@ describe("wire protocol", () => {
       decodeWireMessage(JSON.stringify(lobby(["guest-2", "guest-2"]))).ok,
     ).toBeFalse();
     expect(decodeWireMessage(JSON.stringify(lobby("guest-2"))).ok).toBeFalse();
+  });
+
+  test("rejects a malformed connection map", () => {
+    const message = (connections: unknown) => ({
+      type: "CONNECTION",
+      protocol: PARTY_PROTOCOL_VERSION,
+      connections,
+    });
+
+    expect(decodeWireMessage(JSON.stringify(message([]))).ok).toBeFalse();
+    expect(
+      decodeWireMessage(
+        JSON.stringify(
+          message({ "guest-1": { transport: "carrier-pigeon", candidate: "host" } }),
+        ),
+      ).ok,
+    ).toBeFalse();
+    expect(
+      decodeWireMessage(
+        JSON.stringify(
+          message({ "guest-1": { transport: "webrtc", candidate: "teleport" } }),
+        ),
+      ).ok,
+    ).toBeFalse();
+    expect(
+      decodeWireMessage(
+        JSON.stringify(
+          message({ "bot-red": { transport: "webrtc", candidate: "host" } }),
+        ),
+      ).ok,
+    ).toBeFalse();
   });
 
   test("rejects unknown types, wrong protocols and non-text input", () => {

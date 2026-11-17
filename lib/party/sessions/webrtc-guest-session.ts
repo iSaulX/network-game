@@ -6,6 +6,7 @@ import {
   type GameMode,
   type LanPlayerInfo,
   type LanRoster,
+  type SeatConnection,
   type WireMessage,
 } from "../protocol";
 import {
@@ -50,6 +51,7 @@ export class WebRTCGuestSession extends GameSession {
   private roster: LanRoster | null = null;
   private mode: GameMode = "1v1";
   private disconnected: readonly string[] = [];
+  private connections: Readonly<Record<string, SeatConnection>> = {};
   private eventsValue: readonly GameEvent[] = [];
   private connected = false;
   private disposed = false;
@@ -108,6 +110,7 @@ export class WebRTCGuestSession extends GameSession {
       roster: this.roster,
       disconnected: this.disconnected,
       mode: this.mode,
+      connections: this.connections,
     };
   }
 
@@ -122,6 +125,29 @@ export class WebRTCGuestSession extends GameSession {
   /** Guests cannot change the room's seats; the host owns the lobby. */
   setSeatEmpty(): void {
     throw new GameSessionError("GUEST_CANNOT_START");
+  }
+
+  /**
+   * Records the ICE path of a seat. The guest reports its own link locally;
+   * the host's `CONNECTION` broadcast fills in the other seats.
+   */
+  setSeatConnection(seatId: string, connection: SeatConnection): void {
+    if (this.disposed) {
+      return;
+    }
+
+    const previous = this.connections[seatId];
+
+    if (
+      previous &&
+      previous.transport === connection.transport &&
+      previous.candidate === connection.candidate
+    ) {
+      return;
+    }
+
+    this.connections = { ...this.connections, [seatId]: connection };
+    this.notifier.emit(this.snapshot);
   }
 
   /** Starts the transport (the guest's channel is already open in practice). */
@@ -249,6 +275,10 @@ export class WebRTCGuestSession extends GameSession {
         if (message.code === "PROTOCOL_MISMATCH") {
           this.status = "failed";
         }
+        this.notifier.emit(this.snapshot);
+        return;
+      case "CONNECTION":
+        this.connections = message.connections;
         this.notifier.emit(this.snapshot);
         return;
       case "BYE":

@@ -46,6 +46,12 @@ export const EMPTY_ROOM_TTL_MS = 10 * 60_000;
 /** A full room holds one offer/answer pair per guest plus a few control notes. */
 export const MAX_SIGNALS_PER_ROOM = 64;
 
+/**
+ * Signals older than this are dropped even if nobody read them. Pairing
+ * completes in seconds, so a minute-old offer can no longer be useful.
+ */
+export const SIGNAL_TTL_MS = 2 * 60_000;
+
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const ROOM_CODE_LENGTH = 6;
 
@@ -53,6 +59,8 @@ export type VersusStoreError =
   | "ROOM_NOT_FOUND"
   | "ROOM_FULL"
   | "ROOM_CLOSED"
+  | "ROOM_STARTED"
+  | "PEER_GONE"
   | "UNAUTHORIZED"
   | "BAD_SIGNAL"
   | "TOO_MANY_SIGNALS";
@@ -80,6 +88,13 @@ export interface VersusSignal {
   readonly from: string;
   /** The only peer allowed to read it, or `null` for a broadcast. */
   readonly to: string | null;
+  /**
+   * Occupant generation of the sender and recipient. A seat is reused by
+   * later guests, and signals from a previous occupant must never reach the
+   * next one (nor the host, once that guest is gone).
+   */
+  readonly fromEpoch: number;
+  readonly toEpoch: number | null;
 }
 
 export interface VersusPresence {
@@ -97,7 +112,13 @@ export interface VersusPoll {
 
 interface StoredPeer extends VersusPeer {
   readonly role: VersusRole;
+  /** Incremented on every join, so seat reuse is distinguishable. */
+  readonly epoch: number;
+  /** Signals at or below this seq predate the peer and are never delivered. */
+  readonly joinedSeq: number;
   lastSeenAt: number;
+  /** Highest cursor this peer has polled with; used to prune read signals. */
+  lastPolledSeq: number;
 }
 
 interface Room {
@@ -106,7 +127,10 @@ interface Room {
   readonly createdAt: number;
   touchedAt: number;
   closed: boolean;
+  /** True once the host starts the match; new guests are refused. */
+  started: boolean;
   seq: number;
+  epochCounter: number;
   readonly peers: Map<string, StoredPeer>;
   readonly signals: VersusSignal[];
 }
@@ -131,6 +155,10 @@ export interface VersusServer {
     since: number,
   ): VersusResult<VersusPoll>;
   leave(credentials: VersusPeer & { code: string }): VersusResult<null>;
+  /** Host-only: refuses new guests because the match already started. */
+  markStarted(
+    credentials: VersusPeer & { code: string },
+  ): VersusResult<null>;
 }
 
 const SIGNAL_KINDS = new Set<VersusSignalKind>([
@@ -190,6 +218,54 @@ export function createVersusServer(
   const guestsOf = (room: Room): string[] =>
     GUEST_SEAT_IDS.filter((id) => room.peers.has(id));
 
+  /**
+   * Drops signals that can no longer be delivered usefully:
+   * - ones whose sender seat has since been re-occupied (or emptied),
+   * - ones addressed to a seat that is gone or already read them,
+   * - broadcasts every other peer has already polled past,
+   * - anything older than `SIGNAL_TTL_MS`.
+   *
+   * Without this the room accumulates every join/leave/offer forever and
+   * eventually refuses new signals (`TOO_MANY_SIGNALS`), poisoning the room
+   * for everyone.
+   */
+  const pruneSignals = (room: Room, time: number) => {
+    const peers = [...room.peers.values()];
+
+    const kept = room.signals.filter((signal) => {
+      if (time - signal.at > SIGNAL_TTL_MS) {
+        return false;
+      }
+
+      // A `left` note is the only signal whose sender is already gone.
+      if (signal.kind !== "left") {
+        const sender = room.peers.get(signal.from);
+        if (!sender || sender.epoch !== signal.fromEpoch) {
+          return false;
+        }
+      }
+
+      if (signal.to === null) {
+        return peers.some(
+          (peer) => peer.id !== signal.from && peer.lastPolledSeq < signal.seq,
+        );
+      }
+
+      const recipient = room.peers.get(signal.to);
+
+      if (!recipient || recipient.epoch !== signal.toEpoch) {
+        return false;
+      }
+
+      return recipient.lastPolledSeq < signal.seq;
+    });
+
+    if (kept.length !== room.signals.length) {
+      room.signals.length = 0;
+      room.signals.push(...kept);
+    }
+  };
+
   const prune = (time: number) => {
     for (const [code, room] of rooms) {
       const hasGuest = guestsOf(room).length > 0;
@@ -203,7 +279,10 @@ export function createVersusServer(
 
       if (expired) {
         rooms.delete(code);
+        continue;
       }
+
+      pruneSignals(room, time);
     }
   };
 
@@ -245,6 +324,8 @@ export function createVersusServer(
       at: time,
       from,
       to,
+      fromEpoch: room.peers.get(from)?.epoch ?? 0,
+      toEpoch: to === null ? null : (room.peers.get(to)?.epoch ?? 0),
     });
   };
 
@@ -269,7 +350,10 @@ export function createVersusServer(
       id: "host",
       token: randomToken(),
       role: "host",
+      epoch: 1,
+      joinedSeq: 0,
       lastSeenAt: time,
+      lastPolledSeq: 0,
     };
 
     rooms.set(code, {
@@ -278,7 +362,9 @@ export function createVersusServer(
       createdAt: time,
       touchedAt: time,
       closed: false,
+      started: false,
       seq: 0,
+      epochCounter: 1,
       peers: new Map([[host.id, host]]),
       signals: [],
     });
@@ -301,6 +387,10 @@ export function createVersusServer(
       return { ok: false, error: "ROOM_CLOSED" };
     }
 
+    if (room.started) {
+      return { ok: false, error: "ROOM_STARTED" };
+    }
+
     const seat = GUEST_SEAT_IDS.slice(0, room.capacity - 1).find(
       (id) => !room.peers.has(id),
     );
@@ -309,11 +399,28 @@ export function createVersusServer(
       return { ok: false, error: "ROOM_FULL" };
     }
 
+    // The seat may have held a previous guest whose pairing is still in the
+    // log. Those signals must never reach the next occupant, or it answers an
+    // offer the host is no longer waiting for.
+    const kept = room.signals.filter(
+      (signal) => signal.from !== seat && signal.to !== seat,
+    );
+    if (kept.length !== room.signals.length) {
+      room.signals.length = 0;
+      room.signals.push(...kept);
+    }
+
+    room.epochCounter += 1;
+
     const guest: StoredPeer = {
       id: seat,
       token: randomToken(),
       role: "guest",
+      epoch: room.epochCounter,
+      // Nothing emitted before this join is relevant to this occupant.
+      joinedSeq: room.seq,
       lastSeenAt: time,
+      lastPolledSeq: room.seq,
     };
 
     room.peers.set(guest.id, guest);
@@ -357,8 +464,15 @@ export function createVersusServer(
       return { ok: false, error: "BAD_SIGNAL" };
     }
 
-    if (to !== null && (typeof to !== "string" || !room.peers.has(to))) {
+    if (to !== null && typeof to !== "string") {
       return { ok: false, error: "BAD_SIGNAL" };
+    }
+
+    // The seat may have left between the sender's poll and this request.
+    // That is a race, not a malformed message: report it separately so the
+    // host can drop the seat instead of ending the whole lobby.
+    if (to !== null && !room.peers.has(to)) {
+      return { ok: false, error: "PEER_GONE" };
     }
 
     if (room.signals.length >= MAX_SIGNALS_PER_ROOM) {
@@ -395,21 +509,36 @@ export function createVersusServer(
 
     const peer = room.peers.get(credentials.id);
 
-    if (peer) {
-      peer.lastSeenAt = time;
+    if (!peer) {
+      return { ok: false, error: "UNAUTHORIZED" };
     }
 
+    peer.lastSeenAt = time;
     room.touchedAt = time;
 
-    const cursor = Number.isFinite(since) ? Math.max(0, Math.floor(since)) : 0;
+    // A seat may be reused; never replay anything from before this occupant
+    // joined, even if the client starts its cursor at zero.
+    const cursor = Math.max(
+      peer.joinedSeq,
+      Number.isFinite(since) ? Math.max(0, Math.floor(since)) : 0,
+    );
+
+    peer.lastPolledSeq = Math.max(peer.lastPolledSeq, cursor);
+
     // A peer only reads what was addressed to it (or broadcast); its own
-    // messages are noise.
+    // messages are noise, and signals from a previous occupant of a seat are
+    // never delivered.
     const signals = room.signals.filter(
       (signal) =>
         signal.seq > cursor &&
         signal.from !== credentials.id &&
-        (signal.to === null || signal.to === credentials.id),
+        (signal.to === null || signal.to === credentials.id) &&
+        (signal.kind === "left" ||
+          room.peers.get(signal.from)?.epoch === signal.fromEpoch) &&
+        (signal.to === null || signal.toEpoch === peer.epoch),
     );
+
+    pruneSignals(room, time);
 
     return {
       ok: true,
@@ -437,21 +566,55 @@ export function createVersusServer(
       return { ok: false, error: error ?? "ROOM_NOT_FOUND" };
     }
 
-    room.peers.delete(credentials.id);
-
     if (roleOf(credentials.id) === "host") {
       // No host migration: the room ends for everyone.
+      room.peers.delete(credentials.id);
       room.closed = true;
       room.signals.length = 0;
-    } else {
-      room.touchedAt = time;
-      pushSignal(room, credentials.id, "left", "", "host", time);
+      return { ok: true, value: null };
     }
+
+    // Drop everything addressed to or sent by the departing guest before the
+    // `left` note, so a later occupant of the seat inherits a clean log.
+    const kept = room.signals.filter(
+      (signal) =>
+        signal.from !== credentials.id && signal.to !== credentials.id,
+    );
+    if (kept.length !== room.signals.length) {
+      room.signals.length = 0;
+      room.signals.push(...kept);
+    }
+
+    room.peers.delete(credentials.id);
+    room.touchedAt = time;
+    pushSignal(room, credentials.id, "left", "", "host", time);
 
     return { ok: true, value: null };
   };
 
-  return { create, join, send, poll, leave };
+  /** Host-only: marks the room as started, refusing new guests from now on. */
+  const markStarted = (
+    credentials: VersusPeer & { code: string },
+  ): VersusResult<null> => {
+    const time = now();
+    const room = findRoom(credentials.code, time);
+    const error = authorize(room, credentials);
+
+    if (error || !room) {
+      return { ok: false, error: error ?? "ROOM_NOT_FOUND" };
+    }
+
+    if (roleOf(credentials.id) !== "host") {
+      return { ok: false, error: "UNAUTHORIZED" };
+    }
+
+    room.started = true;
+    room.touchedAt = time;
+
+    return { ok: true, value: null };
+  };
+
+  return { create, join, send, poll, leave, markStarted };
 }
 
 interface VersusGlobal {

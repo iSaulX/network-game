@@ -410,6 +410,47 @@ describe("party sessions", () => {
     expect(room.host.snapshot.state?.phase).toBe("finished");
   });
 
+  test("the host shares how each seat is connected", () => {
+    const room = openRoom("all", 2);
+
+    room.host.setSeatConnection("host", {
+      transport: "webrtc",
+      candidate: "host",
+    });
+    room.host.setSeatConnection("guest-1", {
+      transport: "webrtc",
+      candidate: "srflx",
+    });
+    room.host.setSeatConnection("guest-2", {
+      transport: "webrtc",
+      candidate: "relay",
+    });
+
+    const expected = {
+      host: { transport: "webrtc", candidate: "host" },
+      "guest-1": { transport: "webrtc", candidate: "srflx" },
+      "guest-2": { transport: "webrtc", candidate: "relay" },
+    };
+
+    expect(room.host.snapshot.connections).toEqual(expected);
+    // Every guest receives the same map over its data channel.
+    for (const guest of room.guests) {
+      expect(guest.snapshot.connections).toEqual(expected);
+    }
+  });
+
+  test("a dropped guest's connection entry disappears", () => {
+    const room = openRoom("all", 2);
+
+    room.host.setSeatConnection("guest-2", {
+      transport: "webrtc",
+      candidate: "relay",
+    });
+    room.pairs[1]!.disconnect();
+
+    expect(room.host.snapshot.connections["guest-2"]).toBeUndefined();
+  });
+
   test("disposing the host disconnects every guest", () => {
     const room = openRoom("all", 2);
     room.host.start();

@@ -28,6 +28,8 @@ export type LobbyFailure =
   | "room-not-found"
   | "room-full"
   | "room-closed"
+  | "room-started"
+  | "protocol-error"
   | "bad-code"
   | "ice-failed"
   | "timeout"
@@ -89,6 +91,8 @@ const FAILURES: ReadonlySet<string> = new Set<LobbyFailure>([
   "room-not-found",
   "room-full",
   "room-closed",
+  "room-started",
+  "protocol-error",
   "bad-code",
   "ice-failed",
   "timeout",
@@ -111,6 +115,10 @@ export const LOBBY_FAILURE_COPY: Readonly<Record<LobbyFailure, string>> =
     "room-full": "Esa partida ya está completa.",
     "room-closed":
       "La partida se ha cerrado. Pídele un código nuevo al anfitrión.",
+    "room-started":
+      "La partida ya ha empezado. Pídele al anfitrión que cree una nueva.",
+    "protocol-error":
+      "El servidor de partidas no aceptó la solicitud. Vuelve a intentarlo.",
     "bad-code": "El código debe tener 6 caracteres.",
     "ice-failed":
       "No se pudo conectar con el anfitrión. Algunas redes (conexiones móviles, redes de oficina o cortafuegos) bloquean las conexiones directas.",

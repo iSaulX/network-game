@@ -289,6 +289,7 @@ export function PartyGameScreen({
         autoControl={{ checked: autoMode, onChange: handleAutoChange }}
         remoteHuman
         profiles={profiles}
+        connections={snapshot.connections}
         modeLabel={
           snapshot.mode === "1v1"
             ? "1 contra 1 · en línea"

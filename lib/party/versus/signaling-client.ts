@@ -53,6 +53,9 @@ export type VersusClientFailure =
   | "room-not-found"
   | "room-full"
   | "room-closed"
+  | "room-started"
+  | "peer-gone"
+  | "too-many-signals"
   | "unauthorized"
   | "bad-request"
   | "server-error"
@@ -86,6 +89,50 @@ function mapStatus(status: number): VersusClientFailure {
     default:
       return "server-error";
   }
+}
+
+/**
+ * Store error codes carried in the response body. A 409 can mean a full
+ * room, a closed room or an already-started match; the status alone cannot
+ * tell them apart, and the user-visible copy differs.
+ */
+const STORE_FAILURES: Readonly<Record<string, VersusClientFailure>> =
+  Object.freeze({
+    ROOM_NOT_FOUND: "room-not-found",
+    ROOM_FULL: "room-full",
+    ROOM_CLOSED: "room-closed",
+    ROOM_STARTED: "room-started",
+    PEER_GONE: "peer-gone",
+    TOO_MANY_SIGNALS: "too-many-signals",
+    UNAUTHORIZED: "unauthorized",
+    BAD_SIGNAL: "bad-request",
+  });
+
+async function mapResponseFailure(
+  response: Response,
+): Promise<VersusClientFailure> {
+  if (
+    response.status === 400 ||
+    response.status === 401 ||
+    response.status === 404 ||
+    response.status === 409 ||
+    response.status === 413
+  ) {
+    try {
+      const payload = (await response.json()) as { error?: unknown };
+
+      if (typeof payload.error === "string") {
+        const mapped = STORE_FAILURES[payload.error];
+        if (mapped) {
+          return mapped;
+        }
+      }
+    } catch {
+      // Not JSON or already consumed: fall back to the status.
+    }
+  }
+
+  return mapStatus(response.status);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -234,7 +281,7 @@ export class VersusSignalingClient {
       });
 
       if (!response.ok) {
-        return { ok: false, failure: mapStatus(response.status) };
+        return { ok: false, failure: await mapResponseFailure(response) };
       }
 
       return { ok: true, value: null };
@@ -267,7 +314,7 @@ export class VersusSignalingClient {
       );
 
       if (!response.ok) {
-        return { ok: false, failure: mapStatus(response.status) };
+        return { ok: false, failure: await mapResponseFailure(response) };
       }
 
       const parsed = parsePoll(await response.json());
@@ -297,6 +344,23 @@ export class VersusSignalingClient {
       // Leaving is best-effort; the room expires on its own.
     }
   }
+
+  /**
+   * Host-only: tells the server the match started so a later `join` fails
+   * immediately with "the match already started" instead of waiting for the
+   * connect timeout.
+   */
+  async markStarted(): Promise<void> {
+    if (this.left) {
+      return;
+    }
+
+    try {
+      await this.post({ action: "start", ...this.credentials });
+    } catch {
+      // Best-effort: the match still runs; only late joins lose the hint.
+    }
+  }
 }
 
 async function postRoom(
@@ -313,21 +377,7 @@ async function postRoom(
     });
 
     if (!response.ok) {
-      const failure = mapStatus(response.status);
-
-      // A full room and a closed room are user-visible but distinct.
-      if (failure === "room-full") {
-        try {
-          const payload = (await response.json()) as { error?: string };
-          if (payload.error === "ROOM_CLOSED") {
-            return { ok: false, failure: "room-closed" };
-          }
-        } catch {
-          // Fall through to ROOM_FULL.
-        }
-      }
-
-      return { ok: false, failure };
+      return { ok: false, failure: await mapResponseFailure(response) };
     }
 
     const parsed = parseCredentials(await response.json());

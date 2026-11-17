@@ -1,5 +1,10 @@
 import type { ReactNode } from "react";
-import type { GameMode, LanPlayerInfo } from "@/lib/party/protocol";
+import type {
+  GameMode,
+  LanPlayerInfo,
+  SeatConnection,
+} from "@/lib/party/protocol";
+import { describeSeatConnection } from "@/lib/party/connection-copy";
 import { boardColorOf } from "@/lib/party/seats";
 import { AvatarVisual } from "@/components/avatar-visual";
 import { COLOR_ACCENT } from "@/components/game/game-players";
@@ -15,6 +20,8 @@ export interface LobbySeatProps {
   readonly mode: GameMode;
   /** True when the host left this seat without a bot. */
   readonly empty?: boolean;
+  /** How the seat's client is connected, when known. */
+  readonly connection?: SeatConnection | null;
   /** Optional inline control (the host's bot/empty picker). */
   readonly action?: ReactNode;
 }
@@ -26,10 +33,12 @@ export function LobbySeat({
   isHost,
   mode,
   empty = false,
+  connection = null,
   action,
 }: LobbySeatProps) {
   const boardColor = boardColorOf(seatId, mode) ?? "red";
   const accent = COLOR_ACCENT[boardColor];
+  const connectionCopy = describeSeatConnection(connection);
 
   return (
     <li
@@ -68,6 +77,11 @@ export function LobbySeat({
               ? " · queda vacío en la partida"
               : " · lo ocupa un bot al empezar"}
         </p>
+        {connectionCopy && (
+          <p className="truncate text-[10px] leading-tight text-stone-500">
+            {connectionCopy}
+          </p>
+        )}
       </div>
 
       {action ??

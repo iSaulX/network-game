@@ -10,7 +10,7 @@
  */
 import type { BonusMove, GameEvent, GameState, Move } from "@/lib/parchis/types";
 
-export const PARTY_PROTOCOL_VERSION = 3 as const;
+export const PARTY_PROTOCOL_VERSION = 4 as const;
 
 /** Hard cap for one data-channel message. State snapshots are far smaller. */
 export const MAX_WIRE_CHARS = 64 * 1024;
@@ -47,6 +47,17 @@ export interface LanPlayerInfo {
 
 export interface LanRoster {
   readonly players: readonly LanPlayerInfo[];
+}
+
+/** ICE candidate type actually selected for a peer's link. */
+export type IceCandidateType = "host" | "srflx" | "prflx" | "relay" | "unknown";
+
+/** How a seat is connected: a direct WebRTC channel or the in-memory test pair. */
+export type SeatTransport = "webrtc" | "memory";
+
+export interface SeatConnection {
+  readonly transport: SeatTransport;
+  readonly candidate: IceCandidateType;
 }
 
 export type ClientAction =
@@ -120,6 +131,12 @@ export type HostToGuestMessage =
       readonly state?: GameState;
     }
   | {
+      readonly type: "CONNECTION";
+      readonly protocol: number;
+      /** Per-seat transport and selected ICE candidate type. */
+      readonly connections: Readonly<Record<string, SeatConnection>>;
+    }
+  | {
       readonly type: "BYE";
       readonly protocol: number;
       readonly reason: "host-closed";
@@ -132,7 +149,22 @@ export type DecodeResult =
   | { readonly ok: false; readonly code: PartyErrorCode; readonly message: string };
 
 const GUEST_MESSAGE_TYPES = new Set(["HELLO", "ACTION"]);
-const HOST_MESSAGE_TYPES = new Set(["LOBBY", "START", "STATE", "ERROR", "BYE"]);
+const HOST_MESSAGE_TYPES = new Set([
+  "LOBBY",
+  "START",
+  "STATE",
+  "ERROR",
+  "CONNECTION",
+  "BYE",
+]);
+const CANDIDATE_TYPES = new Set<string>([
+  "host",
+  "srflx",
+  "prflx",
+  "relay",
+  "unknown",
+]);
+const SEAT_TRANSPORTS = new Set<string>(["webrtc", "memory"]);
 const ERROR_CODES = new Set<string>([
   "PROTOCOL_MISMATCH",
   "BAD_MESSAGE",
@@ -256,6 +288,34 @@ function isClientAction(value: unknown): value is ClientAction {
     default:
       return false;
   }
+}
+
+function isSeatConnection(value: unknown): value is SeatConnection {
+  return (
+    isRecord(value) &&
+    typeof value.transport === "string" &&
+    SEAT_TRANSPORTS.has(value.transport) &&
+    typeof value.candidate === "string" &&
+    CANDIDATE_TYPES.has(value.candidate)
+  );
+}
+
+function isConnectionMap(
+  value: unknown,
+): value is Readonly<Record<string, SeatConnection>> {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const entries = Object.entries(value);
+
+  return (
+    entries.length <= 4 &&
+    entries.every(
+      ([seat, connection]) =>
+        (seat === "host" || isGuestId(seat)) && isSeatConnection(connection),
+    )
+  );
 }
 
 function isLanPlayerInfo(value: unknown): value is LanPlayerInfo {
@@ -411,6 +471,13 @@ export function decodeWireMessage(raw: unknown): DecodeResult {
   if (type === "BYE") {
     if (parsed.reason !== "host-closed") {
       return fail("BAD_MESSAGE", "Malformed BYE.");
+    }
+    return { ok: true, message: parsed as unknown as HostToGuestMessage };
+  }
+
+  if (type === "CONNECTION") {
+    if (!isConnectionMap(parsed.connections)) {
+      return fail("BAD_MESSAGE", "Malformed CONNECTION.");
     }
     return { ok: true, message: parsed as unknown as HostToGuestMessage };
   }
