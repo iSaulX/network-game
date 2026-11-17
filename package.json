@@ -16,7 +16,7 @@
     "@heroui/react": "^3.2.7",
     "@heroui/styles": "^3.2.7",
     "drawably": "^0.4.2",
-    "next": "16.4.2",
+    "next": "^16.4.6",
     "pixi.js": "^8.23.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -26,7 +26,7 @@
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4.3.5",
-    "@tauri-apps/cli": "^2.12.4",
+    "@tauri-apps/cli": "^2.12.5",
     "@types/bun": "^1.4.4",
     "@types/node": "^20.19.43",
     "@types/react": "^19.3.0",
