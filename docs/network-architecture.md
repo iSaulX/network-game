@@ -316,13 +316,15 @@ Presence gives the host the live roster: `{ host: true, guests: ["guest-1"] }`.
 The `joined` and `left` signals are never echoed to their sender; they tell the
 host when to start or drop a connection.
 
-### 5.4 Honest limits of the in-memory store
+### 5.4 Redis-backed store
 
-Rooms live on `globalThis.__versusRooms` inside one Node process. That is fine
-for a single long-lived server, but **serverless or multi-instance deployments
-need an external store** (for example Redis). Without one, a poll can land on a
-different instance and 404. This is a documented constraint, not a hidden
-assumption.
+Rooms are stored in Redis as one JSON value per code, so every serverless
+instance sees the same state: a host can create on one invocation and a guest
+can join on another. Each mutation runs under a short 5 s per-room lock, and
+the room key carries the same TTL rules as the in-memory store (30 min with
+guests, 10 min while guest-less). A Redis failure returns `STORE_UNAVAILABLE`
+(503) instead of silently falling back to process memory, because a mixed
+store would split a room across instances. Game state never reaches Redis.
 
 ---
 
@@ -553,8 +555,10 @@ short enough that a user is not left staring at a spinner.
   keys.
 - **No secrets in the client**: there is no API key. The signaling server
   stores no credentials beyond the ephemeral room.
-- **No persistence**: rooms, signals and tokens are in memory and disappear on
-  restart.
+- **Ephemeral persistence**: rooms, relayed signals and peer tokens live in
+  Redis only for the room TTL (30 min active, 10 min guest-less) and are
+  deleted afterwards. Game state never reaches the server, and the Redis
+  credentials stay server-side.
 - **No logging of payloads**: SDP, tokens and game state are never logged.
 - **Trust statement**: guests trust the host's dice and state. Do not use this
   mode for competitive or ranked play without an authoritative server.
@@ -598,7 +602,8 @@ short enough that a user is not left staring at a spinner.
 | `lib/party/versus/signaling-client.ts` | Capacity, targeted signals, presence, polling |
 | `lib/party/versus/description.ts` | SDP JSON codec + validation |
 | `lib/party/versus/lobby.ts` | Pure lobby state machine and Spanish copy |
-| `lib/server/versus/rooms.ts` | In-memory room store, tokens, TTLs, caps |
+| `lib/server/versus/rooms.ts` | Pure room rules, serialization, tokens, TTLs, caps and the in-memory store (tests) |
+| `lib/server/versus/redis-store.ts` | Redis-backed room store used by the route: connection singleton, per-room locks, TTLs |
 | `app/api/versus/route.ts` | HTTP signaling endpoint |
 
 ---
@@ -617,6 +622,10 @@ short enough that a user is not left staring at a spinner.
 - **Signaling**: capacity 2/4, seat assignment, targeted delivery, presence,
   full/unknown rooms, malformed server responses, seat reuse (no stale SDP),
   signal pruning, `PEER_GONE` on a departed seat, `ROOM_STARTED` on a late join.
+- **Redis store**: a fake Redis client proves rooms and signals are shared
+  across store instances, guest-less rooms expire on the injected clock,
+  corrupt payloads are treated as missing, and Redis failures return
+  `STORE_UNAVAILABLE`.
 - **TURN**: credential minting with a fake Cloudflare fetch (valid payload,
   TURN-less STUN entry, HTTP error, network error, malformed payload, TTL
   clamp), and the browser fallback to STUN.
@@ -641,4 +650,6 @@ prove the logic, and browser checks prove the wiring.
 - **Host migration**: not implemented. If the host leaves, the room closes.
 - **Reconnection**: a guest that drops mid-match is played by the host; it
   cannot currently rejoin.
-- **Scale**: the in-memory room store is single-instance by design.
+- **Scale**: rooms are shared through one Redis instance, so the signaling
+  route is horizontally scalable. Per-instance Redis connections and the free
+  tier's connection limit remain the practical ceiling.

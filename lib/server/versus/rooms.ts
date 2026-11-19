@@ -1,15 +1,15 @@
 /**
- * Server-only, in-memory pairing rooms for the online party modes.
+ * Server-only room logic for the online party modes.
  *
  * The server never sees or stores game state: it only relays WebRTC
  * offer/answer strings between the peers of a room. A room seats one host and
  * up to three guests, so the host opens one direct connection per guest.
- * Rooms are ephemeral, live on `globalThis` so every route-handler bundle
- * shares one store, and are pruned as soon as they expire. Payloads are capped
- * and never logged.
  *
- * This store assumes a single long-lived Node process (see `architecture.md`).
- * Serverless/multi-instance deployments would need an external store.
+ * The room rules are pure functions over a `VersusRoom` snapshot. Two stores
+ * use them: `createVersusServer()` keeps rooms in process memory (tests and
+ * local tools), while `redis-store.ts` persists each snapshot in Redis so the
+ * store survives across serverless instances. Payloads are capped and never
+ * logged.
  */
 import { randomBytes } from "node:crypto";
 
@@ -63,7 +63,8 @@ export type VersusStoreError =
   | "PEER_GONE"
   | "UNAUTHORIZED"
   | "BAD_SIGNAL"
-  | "TOO_MANY_SIGNALS";
+  | "TOO_MANY_SIGNALS"
+  | "STORE_UNAVAILABLE";
 
 export type VersusResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -110,7 +111,7 @@ export interface VersusPoll {
   readonly closed: boolean;
 }
 
-interface StoredPeer extends VersusPeer {
+export interface StoredPeer extends VersusPeer {
   readonly role: VersusRole;
   /** Incremented on every join, so seat reuse is distinguishable. */
   readonly epoch: number;
@@ -121,7 +122,11 @@ interface StoredPeer extends VersusPeer {
   lastPolledSeq: number;
 }
 
-interface Room {
+/**
+ * One room's full mutable state. It is a plain snapshot so a Redis-backed
+ * store can serialize it as a single JSON value.
+ */
+export interface VersusRoom {
   readonly code: string;
   readonly capacity: VersusCapacity;
   readonly createdAt: number;
@@ -169,11 +174,11 @@ const SIGNAL_KINDS = new Set<VersusSignalKind>([
   "bye",
 ]);
 
-function randomToken(): string {
+export function randomToken(): string {
   return randomBytes(32).toString("hex");
 }
 
-function randomRoomCode(): string {
+export function randomRoomCode(): string {
   const bytes = randomBytes(ROOM_CODE_LENGTH);
   let code = "";
 
@@ -204,129 +209,607 @@ function roleOf(id: string): VersusRole {
   return id === "host" ? "host" : "guest";
 }
 
+function isPeerId(value: string): boolean {
+  return value === "host" || isGuestSeatId(value);
+}
+
+export function guestsInRoom(room: VersusRoom): string[] {
+  return GUEST_SEAT_IDS.filter((id) => room.peers.has(id));
+}
+
 /**
- * Creates an isolated store. The production singleton is
- * `getVersusServer()`; tests call this directly with a fake clock.
+ * Drops signals that can no longer be delivered usefully:
+ * - ones whose sender seat has since been re-occupied (or emptied),
+ * - ones addressed to a seat that is gone or already read them,
+ * - broadcasts every other peer has already polled past,
+ * - anything older than `SIGNAL_TTL_MS`.
+ *
+ * Without this the room accumulates every join/leave/offer forever and
+ * eventually refuses new signals (`TOO_MANY_SIGNALS`), poisoning the room
+ * for everyone.
+ */
+export function pruneRoomSignals(room: VersusRoom, time: number): void {
+  const peers = [...room.peers.values()];
+
+  const kept = room.signals.filter((signal) => {
+    if (time - signal.at > SIGNAL_TTL_MS) {
+      return false;
+    }
+
+    // A `left` note is the only signal whose sender is already gone.
+    if (signal.kind !== "left") {
+      const sender = room.peers.get(signal.from);
+      if (!sender || sender.epoch !== signal.fromEpoch) {
+        return false;
+      }
+    }
+
+    if (signal.to === null) {
+      return peers.some(
+        (peer) => peer.id !== signal.from && peer.lastPolledSeq < signal.seq,
+      );
+    }
+
+    const recipient = room.peers.get(signal.to);
+
+    if (!recipient || recipient.epoch !== signal.toEpoch) {
+      return false;
+    }
+
+    return recipient.lastPolledSeq < signal.seq;
+  });
+
+  if (kept.length !== room.signals.length) {
+    room.signals.length = 0;
+    room.signals.push(...kept);
+  }
+}
+
+function roomDeadline(room: VersusRoom): number {
+  // Without a guest the room is only useful while someone could still join,
+  // so it is aged from creation: polling alone cannot keep a guest-less room
+  // alive forever.
+  return guestsInRoom(room).length > 0
+    ? room.touchedAt + ROOM_TTL_MS
+    : room.createdAt + EMPTY_ROOM_TTL_MS;
+}
+
+export function isRoomExpired(room: VersusRoom, time: number): boolean {
+  return time > roomDeadline(room);
+}
+
+/** Whole seconds left before the room expires; at least one. */
+export function roomTtlSeconds(room: VersusRoom, time: number): number {
+  return Math.max(1, Math.ceil((roomDeadline(room) - time) / 1_000));
+}
+
+export function authorizeRoom(
+  room: VersusRoom | null,
+  credentials: VersusPeer,
+): VersusStoreError | null {
+  if (!room) {
+    return "ROOM_NOT_FOUND";
+  }
+
+  const peer = room.peers.get(credentials.id);
+
+  if (!peer || peer.token !== credentials.token) {
+    return "UNAUTHORIZED";
+  }
+
+  return null;
+}
+
+function pushRoomSignal(
+  room: VersusRoom,
+  from: string,
+  kind: VersusSignalKind,
+  payload: string,
+  to: string | null,
+  time: number,
+): void {
+  room.seq += 1;
+  room.signals.push({
+    seq: room.seq,
+    kind,
+    payload,
+    at: time,
+    from,
+    to,
+    fromEpoch: room.peers.get(from)?.epoch ?? 0,
+    toEpoch: to === null ? null : (room.peers.get(to)?.epoch ?? 0),
+  });
+}
+
+export interface CreateRoomParams {
+  readonly code: string;
+  readonly capacity: VersusCapacity;
+  readonly hostToken: string;
+  readonly time: number;
+}
+
+export function createRoomState({
+  code,
+  capacity,
+  hostToken,
+  time,
+}: CreateRoomParams): {
+  room: VersusRoom;
+  credentials: VersusCredentials;
+} {
+  const host: StoredPeer = {
+    id: "host",
+    token: hostToken,
+    role: "host",
+    epoch: 1,
+    joinedSeq: 0,
+    lastSeenAt: time,
+    lastPolledSeq: 0,
+  };
+
+  return {
+    room: {
+      code,
+      capacity,
+      createdAt: time,
+      touchedAt: time,
+      closed: false,
+      started: false,
+      seq: 0,
+      epochCounter: 1,
+      peers: new Map([[host.id, host]]),
+      signals: [],
+    },
+    credentials: {
+      code,
+      id: host.id,
+      token: host.token,
+      role: "host",
+    },
+  };
+}
+
+export function joinRoomState(
+  room: VersusRoom,
+  time: number,
+  guestToken: string,
+): VersusResult<VersusCredentials> {
+  if (room.closed) {
+    return { ok: false, error: "ROOM_CLOSED" };
+  }
+
+  if (room.started) {
+    return { ok: false, error: "ROOM_STARTED" };
+  }
+
+  const seat = GUEST_SEAT_IDS.slice(0, room.capacity - 1).find(
+    (id) => !room.peers.has(id),
+  );
+
+  if (!seat) {
+    return { ok: false, error: "ROOM_FULL" };
+  }
+
+  // The seat may have held a previous guest whose pairing is still in the
+  // log. Those signals must never reach the next occupant, or it answers an
+  // offer the host is no longer waiting for.
+  const kept = room.signals.filter(
+    (signal) => signal.from !== seat && signal.to !== seat,
+  );
+  if (kept.length !== room.signals.length) {
+    room.signals.length = 0;
+    room.signals.push(...kept);
+  }
+
+  room.epochCounter += 1;
+
+  const guest: StoredPeer = {
+    id: seat,
+    token: guestToken,
+    role: "guest",
+    epoch: room.epochCounter,
+    // Nothing emitted before this join is relevant to this occupant.
+    joinedSeq: room.seq,
+    lastSeenAt: time,
+    lastPolledSeq: room.seq,
+  };
+
+  room.peers.set(guest.id, guest);
+  room.touchedAt = time;
+  pushRoomSignal(room, guest.id, "joined", "", "host", time);
+
+  return {
+    ok: true,
+    value: {
+      code: room.code,
+      id: guest.id,
+      token: guest.token,
+      role: "guest",
+    },
+  };
+}
+
+export function sendRoomSignal(
+  room: VersusRoom,
+  credentials: VersusPeer,
+  kind: VersusSignalKind,
+  payload: string,
+  to: string | null,
+  time: number,
+): VersusResult<{ seq: number }> {
+  const error = authorizeRoom(room, credentials);
+
+  if (error) {
+    return { ok: false, error };
+  }
+
+  if (!SIGNAL_KINDS.has(kind) || room.closed) {
+    return { ok: false, error: "BAD_SIGNAL" };
+  }
+
+  if (
+    typeof payload !== "string" ||
+    payload.length > MAX_SIGNAL_CHARS ||
+    (kind !== "joined" && kind !== "left" && payload.length === 0)
+  ) {
+    return { ok: false, error: "BAD_SIGNAL" };
+  }
+
+  if (to !== null && typeof to !== "string") {
+    return { ok: false, error: "BAD_SIGNAL" };
+  }
+
+  // The seat may have left between the sender's poll and this request.
+  // That is a race, not a malformed message: report it separately so the
+  // host can drop the seat instead of ending the whole lobby.
+  if (to !== null && !room.peers.has(to)) {
+    return { ok: false, error: "PEER_GONE" };
+  }
+
+  if (room.signals.length >= MAX_SIGNALS_PER_ROOM) {
+    return { ok: false, error: "TOO_MANY_SIGNALS" };
+  }
+
+  pushRoomSignal(room, credentials.id, kind, payload, to, time);
+  room.touchedAt = time;
+
+  const peer = room.peers.get(credentials.id);
+
+  if (peer) {
+    peer.lastSeenAt = time;
+  }
+
+  if (kind === "bye" && roleOf(credentials.id) === "host") {
+    room.closed = true;
+  }
+
+  return { ok: true, value: { seq: room.seq } };
+}
+
+export function pollRoomState(
+  room: VersusRoom,
+  credentials: VersusPeer,
+  since: number,
+  time: number,
+): VersusResult<VersusPoll> {
+  const error = authorizeRoom(room, credentials);
+
+  if (error) {
+    return { ok: false, error };
+  }
+
+  const peer = room.peers.get(credentials.id);
+
+  if (!peer) {
+    return { ok: false, error: "UNAUTHORIZED" };
+  }
+
+  peer.lastSeenAt = time;
+  room.touchedAt = time;
+
+  // A seat may be reused; never replay anything from before this occupant
+  // joined, even if the client starts its cursor at zero.
+  const cursor = Math.max(
+    peer.joinedSeq,
+    Number.isFinite(since) ? Math.max(0, Math.floor(since)) : 0,
+  );
+
+  peer.lastPolledSeq = Math.max(peer.lastPolledSeq, cursor);
+
+  // A peer only reads what was addressed to it (or broadcast); its own
+  // messages are noise, and signals from a previous occupant of a seat are
+  // never delivered.
+  const signals = room.signals.filter(
+    (signal) =>
+      signal.seq > cursor &&
+      signal.from !== credentials.id &&
+      (signal.to === null || signal.to === credentials.id) &&
+      (signal.kind === "left" ||
+        room.peers.get(signal.from)?.epoch === signal.fromEpoch) &&
+      (signal.to === null || signal.toEpoch === peer.epoch),
+  );
+
+  pruneRoomSignals(room, time);
+
+  return {
+    ok: true,
+    value: {
+      seq: room.seq,
+      signals,
+      present: {
+        host: room.peers.has("host"),
+        guests: guestsInRoom(room),
+      },
+      capacity: room.capacity,
+      closed: room.closed,
+    },
+  };
+}
+
+export function leaveRoomState(
+  room: VersusRoom,
+  credentials: VersusPeer,
+  time: number,
+): VersusResult<null> {
+  const error = authorizeRoom(room, credentials);
+
+  if (error) {
+    return { ok: false, error };
+  }
+
+  if (roleOf(credentials.id) === "host") {
+    // No host migration: the room ends for everyone.
+    room.peers.delete(credentials.id);
+    room.closed = true;
+    room.signals.length = 0;
+    return { ok: true, value: null };
+  }
+
+  // Drop everything addressed to or sent by the departing guest before the
+  // `left` note, so a later occupant of the seat inherits a clean log.
+  const kept = room.signals.filter(
+    (signal) =>
+      signal.from !== credentials.id && signal.to !== credentials.id,
+  );
+  if (kept.length !== room.signals.length) {
+    room.signals.length = 0;
+    room.signals.push(...kept);
+  }
+
+  room.peers.delete(credentials.id);
+  room.touchedAt = time;
+  pushRoomSignal(room, credentials.id, "left", "", "host", time);
+
+  return { ok: true, value: null };
+}
+
+/** Host-only: marks the room as started, refusing new guests from now on. */
+export function markRoomStartedState(
+  room: VersusRoom,
+  credentials: VersusPeer,
+  time: number,
+): VersusResult<null> {
+  const error = authorizeRoom(room, credentials);
+
+  if (error) {
+    return { ok: false, error };
+  }
+
+  if (roleOf(credentials.id) !== "host") {
+    return { ok: false, error: "UNAUTHORIZED" };
+  }
+
+  room.started = true;
+  room.touchedAt = time;
+
+  return { ok: true, value: null };
+}
+
+interface SerializedRoom {
+  readonly code: string;
+  readonly capacity: VersusCapacity;
+  readonly createdAt: number;
+  readonly touchedAt: number;
+  readonly closed: boolean;
+  readonly started: boolean;
+  readonly seq: number;
+  readonly epochCounter: number;
+  readonly peers: ReadonlyArray<readonly [string, StoredPeer]>;
+  readonly signals: readonly VersusSignal[];
+}
+
+/** JSON-safe form of a room; Maps are not representable in JSON. */
+export function serializeRoom(room: VersusRoom): string {
+  const stored: SerializedRoom = {
+    code: room.code,
+    capacity: room.capacity,
+    createdAt: room.createdAt,
+    touchedAt: room.touchedAt,
+    closed: room.closed,
+    started: room.started,
+    seq: room.seq,
+    epochCounter: room.epochCounter,
+    peers: [...room.peers.entries()],
+    signals: room.signals,
+  };
+
+  return JSON.stringify(stored);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * Rebuilds a room from its Redis value. Corrupt or outdated data returns
+ * `null`, which the store treats as a missing room rather than crashing.
+ */
+export function deserializeRoom(raw: string): VersusRoom | null {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const {
+    code,
+    capacity,
+    createdAt,
+    touchedAt,
+    closed,
+    started,
+    seq,
+    epochCounter,
+    peers,
+    signals,
+  } = parsed;
+
+  if (
+    typeof code !== "string" ||
+    !isVersusCapacity(capacity) ||
+    !isFiniteNumber(createdAt) ||
+    !isFiniteNumber(touchedAt) ||
+    typeof closed !== "boolean" ||
+    typeof started !== "boolean" ||
+    !isFiniteNumber(seq) ||
+    !isFiniteNumber(epochCounter) ||
+    !Array.isArray(peers) ||
+    !Array.isArray(signals)
+  ) {
+    return null;
+  }
+
+  const peerMap = new Map<string, StoredPeer>();
+
+  for (const entry of peers) {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      return null;
+    }
+
+    const [id, peer] = entry as [unknown, unknown];
+
+    if (typeof id !== "string" || !isPeerId(id) || !isRecord(peer)) {
+      return null;
+    }
+
+    const { token, role, epoch, joinedSeq, lastSeenAt, lastPolledSeq } = peer;
+
+    if (
+      typeof token !== "string" ||
+      (role !== "host" && role !== "guest") ||
+      !isFiniteNumber(epoch) ||
+      !isFiniteNumber(joinedSeq) ||
+      !isFiniteNumber(lastSeenAt) ||
+      !isFiniteNumber(lastPolledSeq)
+    ) {
+      return null;
+    }
+
+    peerMap.set(id, {
+      id,
+      token,
+      role,
+      epoch,
+      joinedSeq,
+      lastSeenAt,
+      lastPolledSeq,
+    });
+  }
+
+  const storedSignals: VersusSignal[] = [];
+
+  for (const entry of signals) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+
+    const {
+      seq: signalSeq,
+      kind,
+      payload,
+      at,
+      from,
+      to,
+      fromEpoch,
+      toEpoch,
+    } = entry;
+
+    if (
+      !isFiniteNumber(signalSeq) ||
+      typeof kind !== "string" ||
+      !SIGNAL_KINDS.has(kind as VersusSignalKind) ||
+      typeof payload !== "string" ||
+      !isFiniteNumber(at) ||
+      typeof from !== "string" ||
+      (to !== null && typeof to !== "string") ||
+      !isFiniteNumber(fromEpoch) ||
+      (toEpoch !== null && !isFiniteNumber(toEpoch))
+    ) {
+      return null;
+    }
+
+    storedSignals.push({
+      seq: signalSeq,
+      kind: kind as VersusSignalKind,
+      payload,
+      at,
+      from,
+      to,
+      fromEpoch,
+      toEpoch,
+    });
+  }
+
+  return {
+    code,
+    capacity,
+    createdAt,
+    touchedAt,
+    closed,
+    started,
+    seq,
+    epochCounter,
+    peers: peerMap,
+    signals: storedSignals,
+  };
+}
+
+/**
+ * Creates an isolated in-memory store. Tests call this directly with a fake
+ * clock; production uses the Redis-backed store so rooms are shared by every
+ * serverless instance.
  */
 export function createVersusServer(
   options: VersusServerOptions = {},
 ): VersusServer {
   const now = options.now ?? (() => Date.now());
   const newRoomCode = options.newRoomCode ?? randomRoomCode;
-  const rooms = new Map<string, Room>();
-
-  const guestsOf = (room: Room): string[] =>
-    GUEST_SEAT_IDS.filter((id) => room.peers.has(id));
-
-  /**
-   * Drops signals that can no longer be delivered usefully:
-   * - ones whose sender seat has since been re-occupied (or emptied),
-   * - ones addressed to a seat that is gone or already read them,
-   * - broadcasts every other peer has already polled past,
-   * - anything older than `SIGNAL_TTL_MS`.
-   *
-   * Without this the room accumulates every join/leave/offer forever and
-   * eventually refuses new signals (`TOO_MANY_SIGNALS`), poisoning the room
-   * for everyone.
-   */
-  const pruneSignals = (room: Room, time: number) => {
-    const peers = [...room.peers.values()];
-
-    const kept = room.signals.filter((signal) => {
-      if (time - signal.at > SIGNAL_TTL_MS) {
-        return false;
-      }
-
-      // A `left` note is the only signal whose sender is already gone.
-      if (signal.kind !== "left") {
-        const sender = room.peers.get(signal.from);
-        if (!sender || sender.epoch !== signal.fromEpoch) {
-          return false;
-        }
-      }
-
-      if (signal.to === null) {
-        return peers.some(
-          (peer) => peer.id !== signal.from && peer.lastPolledSeq < signal.seq,
-        );
-      }
-
-      const recipient = room.peers.get(signal.to);
-
-      if (!recipient || recipient.epoch !== signal.toEpoch) {
-        return false;
-      }
-
-      return recipient.lastPolledSeq < signal.seq;
-    });
-
-    if (kept.length !== room.signals.length) {
-      room.signals.length = 0;
-      room.signals.push(...kept);
-    }
-  };
+  const rooms = new Map<string, VersusRoom>();
 
   const prune = (time: number) => {
     for (const [code, room] of rooms) {
-      const hasGuest = guestsOf(room).length > 0;
-
-      // Without a guest the room is only useful while someone could still
-      // join, so it is aged from creation: polling alone cannot keep a
-      // guest-less room alive forever.
-      const expired = hasGuest
-        ? time - room.touchedAt > ROOM_TTL_MS
-        : time - room.createdAt > EMPTY_ROOM_TTL_MS;
-
-      if (expired) {
+      if (isRoomExpired(room, time)) {
         rooms.delete(code);
         continue;
       }
 
-      pruneSignals(room, time);
+      pruneRoomSignals(room, time);
     }
   };
 
-  const findRoom = (rawCode: string, time: number): Room | null => {
+  const findRoom = (rawCode: string, time: number): VersusRoom | null => {
     prune(time);
     return rooms.get(normalizeRoomCode(rawCode)) ?? null;
-  };
-
-  const authorize = (
-    room: Room | null,
-    credentials: VersusPeer,
-  ): VersusStoreError | null => {
-    if (!room) {
-      return "ROOM_NOT_FOUND";
-    }
-
-    const peer = room.peers.get(credentials.id);
-
-    if (!peer || peer.token !== credentials.token) {
-      return "UNAUTHORIZED";
-    }
-
-    return null;
-  };
-
-  const pushSignal = (
-    room: Room,
-    from: string,
-    kind: VersusSignalKind,
-    payload: string,
-    to: string | null,
-    time: number,
-  ): void => {
-    room.seq += 1;
-    room.signals.push({
-      seq: room.seq,
-      kind,
-      payload,
-      at: time,
-      from,
-      to,
-      fromEpoch: room.peers.get(from)?.epoch ?? 0,
-      toEpoch: to === null ? null : (room.peers.get(to)?.epoch ?? 0),
-    });
   };
 
   const create = (
@@ -346,33 +829,15 @@ export function createVersusServer(
       return { ok: false, error: "ROOM_FULL" };
     }
 
-    const host: StoredPeer = {
-      id: "host",
-      token: randomToken(),
-      role: "host",
-      epoch: 1,
-      joinedSeq: 0,
-      lastSeenAt: time,
-      lastPolledSeq: 0,
-    };
-
-    rooms.set(code, {
+    const { room, credentials } = createRoomState({
       code,
       capacity,
-      createdAt: time,
-      touchedAt: time,
-      closed: false,
-      started: false,
-      seq: 0,
-      epochCounter: 1,
-      peers: new Map([[host.id, host]]),
-      signals: [],
+      hostToken: randomToken(),
+      time,
     });
 
-    return {
-      ok: true,
-      value: { code, id: host.id, token: host.token, role: "host" },
-    };
+    rooms.set(code, room);
+    return { ok: true, value: credentials };
   };
 
   const join = (rawCode: string): VersusResult<VersusCredentials> => {
@@ -383,59 +848,7 @@ export function createVersusServer(
       return { ok: false, error: "ROOM_NOT_FOUND" };
     }
 
-    if (room.closed) {
-      return { ok: false, error: "ROOM_CLOSED" };
-    }
-
-    if (room.started) {
-      return { ok: false, error: "ROOM_STARTED" };
-    }
-
-    const seat = GUEST_SEAT_IDS.slice(0, room.capacity - 1).find(
-      (id) => !room.peers.has(id),
-    );
-
-    if (!seat) {
-      return { ok: false, error: "ROOM_FULL" };
-    }
-
-    // The seat may have held a previous guest whose pairing is still in the
-    // log. Those signals must never reach the next occupant, or it answers an
-    // offer the host is no longer waiting for.
-    const kept = room.signals.filter(
-      (signal) => signal.from !== seat && signal.to !== seat,
-    );
-    if (kept.length !== room.signals.length) {
-      room.signals.length = 0;
-      room.signals.push(...kept);
-    }
-
-    room.epochCounter += 1;
-
-    const guest: StoredPeer = {
-      id: seat,
-      token: randomToken(),
-      role: "guest",
-      epoch: room.epochCounter,
-      // Nothing emitted before this join is relevant to this occupant.
-      joinedSeq: room.seq,
-      lastSeenAt: time,
-      lastPolledSeq: room.seq,
-    };
-
-    room.peers.set(guest.id, guest);
-    room.touchedAt = time;
-    pushSignal(room, guest.id, "joined", "", "host", time);
-
-    return {
-      ok: true,
-      value: {
-        code: room.code,
-        id: guest.id,
-        token: guest.token,
-        role: "guest",
-      },
-    };
+    return joinRoomState(room, time, randomToken());
   };
 
   const send = (
@@ -446,53 +859,12 @@ export function createVersusServer(
   ): VersusResult<{ seq: number }> => {
     const time = now();
     const room = findRoom(credentials.code, time);
-    const error = authorize(room, credentials);
 
-    if (error || !room) {
-      return { ok: false, error: error ?? "ROOM_NOT_FOUND" };
+    if (!room) {
+      return { ok: false, error: "ROOM_NOT_FOUND" };
     }
 
-    if (!SIGNAL_KINDS.has(kind) || room.closed) {
-      return { ok: false, error: "BAD_SIGNAL" };
-    }
-
-    if (
-      typeof payload !== "string" ||
-      payload.length > MAX_SIGNAL_CHARS ||
-      (kind !== "joined" && kind !== "left" && payload.length === 0)
-    ) {
-      return { ok: false, error: "BAD_SIGNAL" };
-    }
-
-    if (to !== null && typeof to !== "string") {
-      return { ok: false, error: "BAD_SIGNAL" };
-    }
-
-    // The seat may have left between the sender's poll and this request.
-    // That is a race, not a malformed message: report it separately so the
-    // host can drop the seat instead of ending the whole lobby.
-    if (to !== null && !room.peers.has(to)) {
-      return { ok: false, error: "PEER_GONE" };
-    }
-
-    if (room.signals.length >= MAX_SIGNALS_PER_ROOM) {
-      return { ok: false, error: "TOO_MANY_SIGNALS" };
-    }
-
-    pushSignal(room, credentials.id, kind, payload, to, time);
-    room.touchedAt = time;
-
-    const peer = room.peers.get(credentials.id);
-
-    if (peer) {
-      peer.lastSeenAt = time;
-    }
-
-    if (kind === "bye" && roleOf(credentials.id) === "host") {
-      room.closed = true;
-    }
-
-    return { ok: true, value: { seq: room.seq } };
+    return sendRoomSignal(room, credentials, kind, payload, to, time);
   };
 
   const poll = (
@@ -501,58 +873,12 @@ export function createVersusServer(
   ): VersusResult<VersusPoll> => {
     const time = now();
     const room = findRoom(credentials.code, time);
-    const error = authorize(room, credentials);
 
-    if (error || !room) {
-      return { ok: false, error: error ?? "ROOM_NOT_FOUND" };
+    if (!room) {
+      return { ok: false, error: "ROOM_NOT_FOUND" };
     }
 
-    const peer = room.peers.get(credentials.id);
-
-    if (!peer) {
-      return { ok: false, error: "UNAUTHORIZED" };
-    }
-
-    peer.lastSeenAt = time;
-    room.touchedAt = time;
-
-    // A seat may be reused; never replay anything from before this occupant
-    // joined, even if the client starts its cursor at zero.
-    const cursor = Math.max(
-      peer.joinedSeq,
-      Number.isFinite(since) ? Math.max(0, Math.floor(since)) : 0,
-    );
-
-    peer.lastPolledSeq = Math.max(peer.lastPolledSeq, cursor);
-
-    // A peer only reads what was addressed to it (or broadcast); its own
-    // messages are noise, and signals from a previous occupant of a seat are
-    // never delivered.
-    const signals = room.signals.filter(
-      (signal) =>
-        signal.seq > cursor &&
-        signal.from !== credentials.id &&
-        (signal.to === null || signal.to === credentials.id) &&
-        (signal.kind === "left" ||
-          room.peers.get(signal.from)?.epoch === signal.fromEpoch) &&
-        (signal.to === null || signal.toEpoch === peer.epoch),
-    );
-
-    pruneSignals(room, time);
-
-    return {
-      ok: true,
-      value: {
-        seq: room.seq,
-        signals,
-        present: {
-          host: room.peers.has("host"),
-          guests: guestsOf(room),
-        },
-        capacity: room.capacity,
-        closed: room.closed,
-      },
-    };
+    return pollRoomState(room, credentials, since, time);
   };
 
   const leave = (
@@ -560,70 +886,26 @@ export function createVersusServer(
   ): VersusResult<null> => {
     const time = now();
     const room = findRoom(credentials.code, time);
-    const error = authorize(room, credentials);
 
-    if (error || !room) {
-      return { ok: false, error: error ?? "ROOM_NOT_FOUND" };
+    if (!room) {
+      return { ok: false, error: "ROOM_NOT_FOUND" };
     }
 
-    if (roleOf(credentials.id) === "host") {
-      // No host migration: the room ends for everyone.
-      room.peers.delete(credentials.id);
-      room.closed = true;
-      room.signals.length = 0;
-      return { ok: true, value: null };
-    }
-
-    // Drop everything addressed to or sent by the departing guest before the
-    // `left` note, so a later occupant of the seat inherits a clean log.
-    const kept = room.signals.filter(
-      (signal) =>
-        signal.from !== credentials.id && signal.to !== credentials.id,
-    );
-    if (kept.length !== room.signals.length) {
-      room.signals.length = 0;
-      room.signals.push(...kept);
-    }
-
-    room.peers.delete(credentials.id);
-    room.touchedAt = time;
-    pushSignal(room, credentials.id, "left", "", "host", time);
-
-    return { ok: true, value: null };
+    return leaveRoomState(room, credentials, time);
   };
 
-  /** Host-only: marks the room as started, refusing new guests from now on. */
   const markStarted = (
     credentials: VersusPeer & { code: string },
   ): VersusResult<null> => {
     const time = now();
     const room = findRoom(credentials.code, time);
-    const error = authorize(room, credentials);
 
-    if (error || !room) {
-      return { ok: false, error: error ?? "ROOM_NOT_FOUND" };
+    if (!room) {
+      return { ok: false, error: "ROOM_NOT_FOUND" };
     }
 
-    if (roleOf(credentials.id) !== "host") {
-      return { ok: false, error: "UNAUTHORIZED" };
-    }
-
-    room.started = true;
-    room.touchedAt = time;
-
-    return { ok: true, value: null };
+    return markRoomStartedState(room, credentials, time);
   };
 
   return { create, join, send, poll, leave, markStarted };
-}
-
-interface VersusGlobal {
-  __versusRooms?: VersusServer;
-}
-
-/** The shared store used by the route handler. */
-export function getVersusServer(): VersusServer {
-  const scope = globalThis as unknown as VersusGlobal;
-  scope.__versusRooms ??= createVersusServer();
-  return scope.__versusRooms;
 }

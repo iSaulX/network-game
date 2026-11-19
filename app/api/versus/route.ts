@@ -13,7 +13,6 @@
  * which simply omits it.
  */
 import {
-  getVersusServer,
   isGuestSeatId,
   isVersusCapacity,
   MAX_SIGNAL_CHARS,
@@ -23,6 +22,10 @@ import {
   type VersusSignalKind,
   type VersusStoreError,
 } from "@/lib/server/versus/rooms";
+import {
+  getVersusServer,
+  type AsyncVersusServer,
+} from "@/lib/server/versus/redis-store";
 
 const MAX_BODY_CHARS = 32 * 1024;
 const CODE_PATTERN = /^[A-Z0-9]{4,8}$/;
@@ -88,6 +91,8 @@ function storeErrorStatus(error: VersusStoreError): number {
       return 401;
     case "BAD_SIGNAL":
       return 400;
+    case "STORE_UNAVAILABLE":
+      return 503;
   }
 }
 
@@ -111,14 +116,20 @@ export async function POST(request: Request) {
   }
 
   const record = body as Record<string, unknown>;
-  const server = getVersusServer();
+  let server: AsyncVersusServer;
+
+  try {
+    server = await getVersusServer();
+  } catch {
+    return errorResponse(503, "STORE_UNAVAILABLE");
+  }
 
   switch (record.action) {
     case "create": {
       const capacity: VersusCapacity = isVersusCapacity(record.capacity)
         ? record.capacity
         : 2;
-      const created = server.create(capacity);
+      const created = await server.create(capacity);
 
       if (!created.ok) {
         return errorResponse(storeErrorStatus(created.error), created.error);
@@ -132,7 +143,7 @@ export async function POST(request: Request) {
         return errorResponse(400, "BAD_SIGNAL");
       }
 
-      const joined = server.join(record.code);
+      const joined = await server.join(record.code);
 
       if (!joined.ok) {
         return errorResponse(storeErrorStatus(joined.error), joined.error);
@@ -159,7 +170,7 @@ export async function POST(request: Request) {
       }
 
       const to = isPeerId(record.to) ? record.to : null;
-      const sent = server.send(
+      const sent = await server.send(
         {
           code: normalizeRoomCode(record.code),
           id: record.id,
@@ -182,7 +193,7 @@ export async function POST(request: Request) {
         return errorResponse(400, "BAD_SIGNAL");
       }
 
-      const left = server.leave({
+      const left = await server.leave({
         code: normalizeRoomCode(record.code),
         id: record.id,
         token: record.token,
@@ -200,7 +211,7 @@ export async function POST(request: Request) {
         return errorResponse(400, "BAD_SIGNAL");
       }
 
-      const started = server.markStarted({
+      const started = await server.markStarted({
         code: normalizeRoomCode(record.code),
         id: record.id,
         token: record.token,
@@ -238,7 +249,15 @@ export async function GET(request: Request) {
   }
 
   const since = Number(sinceText ?? "0");
-  const polled = getVersusServer().poll(
+  let server: AsyncVersusServer;
+
+  try {
+    server = await getVersusServer();
+  } catch {
+    return errorResponse(503, "STORE_UNAVAILABLE");
+  }
+
+  const polled = await server.poll(
     {
       code: normalizeRoomCode(code),
       id,
