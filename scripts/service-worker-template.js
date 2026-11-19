@@ -17,9 +17,14 @@ const PRECACHE_URLS = __PRECACHE_MANIFEST__;
 const CACHE_PREFIX = "parchis-stars-";
 const CACHE_NAME = `${CACHE_PREFIX}${BUILD_REVISION}`;
 const OFFLINE_URL = "/offline";
+const HOME_URL = "/";
 const NAVIGATION_TIMEOUT_MS = 3000;
 const PRECACHE_CONCURRENCY = 6;
-const ROUTE_PATHS = new Set(["/", "/play", OFFLINE_URL]);
+const ROUTE_PATHS = new Set([HOME_URL, "/play", OFFLINE_URL]);
+// Routes that existed before the unified setup flow. Installed PWAs (the old
+// start URL was `/alone`) and old links can still open them, so navigations
+// are sent to the home page instead of a 404 or the offline page.
+const LEGACY_ROUTE_PATHS = new Set(["/alone", "/lan"]);
 const STATIC_PREFIXES = [
   "/_next/static/",
   "/icons/",
@@ -207,6 +212,17 @@ async function precacheOne(cache, url) {
 async function handleNavigation(event) {
   const { request } = event;
   const path = normalizePath(new URL(request.url).pathname);
+
+  // Old installed PWAs and bookmarks must always land on the home page, even
+  // offline. Redirecting here also skips the network for a route that no
+  // longer exists.
+  if (isLegacyRoute(path)) {
+    return Response.redirect(
+      new URL(HOME_URL, self.location.origin).toString(),
+      302,
+    );
+  }
+
   const cache = await caches.open(CACHE_NAME);
 
   const cachedFallback = async () => {
@@ -412,6 +428,21 @@ function normalizePath(pathname) {
   const trimmed = pathname.replace(/\/+$/, "");
 
   return trimmed === "" ? "/" : trimmed;
+}
+
+/**
+ * Matches a removed route and any path below it.
+ *
+ * @param {string} pathname
+ */
+function isLegacyRoute(pathname) {
+  for (const legacyPath of LEGACY_ROUTE_PATHS) {
+    if (pathname === legacyPath || pathname.startsWith(`${legacyPath}/`)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**

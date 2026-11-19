@@ -21,7 +21,7 @@ const nextConfig: NextConfig = {
         // served directly from the bundled public/ files.
         images: { unoptimized: true },
         // Emit route/index.html so Tauri's asset resolver can serve
-        // /alone/, /play/ and /offline/ without a server rewrite.
+        // /play/ and /offline/ without a server rewrite.
         trailingSlash: true,
       }
     : {
@@ -40,6 +40,22 @@ const nextConfig: NextConfig = {
 };
 
 if (!isDesktopBuild) {
+  // Routes removed when the setup flow was unified into `/`. Installed PWAs
+  // (the old start URL was `/alone`) and old bookmarks can still request them,
+  // so send those navigations to the home page instead of a 404.
+  nextConfig.redirects = async () => [
+    {
+      source: "/alone/:path*",
+      destination: "/",
+      permanent: false,
+    },
+    {
+      source: "/lan/:path*",
+      destination: "/",
+      permanent: false,
+    },
+  ];
+
   // Custom response headers require a Node.js server and are unsupported in a
   // static export, so they are only configured for the web build.
   nextConfig.headers = async () => [
