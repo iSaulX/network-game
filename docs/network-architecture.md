@@ -13,15 +13,18 @@ Scope: the **network** only. Game rules, rendering and UI are out of scope.
 
 | Layer | Technology | Role |
 | --- | --- | --- |
-| Transport of gameplay | WebRTC `RTCDataChannel` over SCTP/DTLS/UDP | Carries every game message between peers |
-| Signaling | Plain HTTP long-poll (`POST`/`GET /api/versus`) | Relays SDP descriptions and presence so peers can find each other |
-| Alternative: server-authoritative | WebSocket (planned, not implemented) | Central game loop; clients send intents, server broadcasts state |
-| NAT traversal | ICE + STUN + Cloudflare TURN | Discovers a usable path; TURN relays when direct/STUN fails |
+| Transport of gameplay | WebSocket to the party server (one per client) | Carries intents up and authoritative snapshots down |
+| Room allocation | Plain HTTP (`POST /api/versus`) backed by Redis | Creates/joins a seat and returns a per-peer token |
+| Game authority | Server process + Redis room snapshot | Validates every action, owns dice, roster and state |
+| Cross-instance fan-out | Redis pub/sub (`parchis:versus:events:<code>`) | Delivers every event to sockets on other serverless instances |
+| Legacy transport | WebRTC `RTCDataChannel` + HTTP signaling + ICE/TURN | Kept for tests/rollback; no longer used by the UI |
 | Identity | 6-character room code + 64-hex per-peer token | Room lookup and per-peer authentication |
 
-The implemented architecture is **peer-to-peer with a host-authoritative
-session**. The server is deliberately not in the gameplay path: it only
-relays a few kilobytes of SDP during pairing and then goes silent.
+The implemented architecture is **server-authoritative over WebSockets, with
+Redis as the shared store and message bus**. Clients only send intents; the
+server applies the engine and broadcasts snapshots. The peer-to-peer WebRTC
+design in sections 2–8 remains in the repository as the legacy path and is
+documented here for comparison.
 
 ---
 
@@ -433,41 +436,41 @@ so the far end is untrusted.
 
 ---
 
-## 9. WebSocket and the server-authoritative alternative
+## 9. WebSocket server-authoritative mode (implemented)
 
-The current design is client-authoritative *among peers*. A central
-server-authoritative design is the natural alternative and is planned as a
-separate route. This section maps the concepts so both can be reasoned about
-together.
+The UI now uses the server-authoritative mode: one authenticated WebSocket per
+client, game state in Redis, and Redis pub/sub so serverless instances share a
+room. The WebRTC peer-to-peer design above is legacy.
 
-### 9.1 What changes
+### 9.1 Comparison
 
-| Concern | Peer-to-peer (implemented) | Server-authoritative (planned) |
+| Concern | Peer-to-peer (legacy) | Server-authoritative (implemented) |
 | --- | --- | --- |
 | Connection | WebRTC data channel per guest | One WebSocket per client |
-| Who owns state | Host peer | Server process |
-| Who rolls dice | Host peer (crypto) | Server (crypto) |
-| Trust boundary | Host trusts nobody; guests trust host | Server trusts nobody |
-| Discovery | HTTP signaling + room code | Room code → join endpoint |
+| Who owns state | Host peer | Server process + Redis snapshot |
+| Who rolls dice | Host peer (crypto) | Server (`crypto.getRandomValues`) |
+| Trust boundary | Guests trust host | Server validates every intent |
+| Discovery | HTTP signaling + room code | HTTP room code → WS `AUTH` |
 | Latency path | peer → peer | peer → server → peers |
-| NAT problem | Hard (ICE/STUN) | None (outbound WS to a server) |
-| Failure mode | Connection may be impossible | Server down / socket drop |
-| Cost | No server in gameplay | Server bandwidth + process |
+| NAT problem | Hard (ICE/STUN/TURN) | None (outbound WS to a server) |
+| Failure mode | Connection may be impossible | Server down / socket drop / function timeout |
+| Cost | No server in gameplay | Server sockets + Redis |
 
-WebSockets avoid the whole NAT chapter: both clients make an outbound
-connection to one public server, which is exactly the direction NAT permits.
-The price is that every action takes two hops and the server becomes
-stateful and must scale.
+WebSockets avoid the NAT chapter entirely: both clients make an outbound
+connection to a public server, which is the direction NAT permits. The price is
+that every action takes two hops, the server is stateful, and a function's
+socket lifetime is capped.
 
 ### 9.2 Same protocol, different transport
 
 The wire messages (`HELLO`, `ACTION`, `LOBBY`, `START`, `STATE`, `ERROR`,
-`BYE`) are already transport-agnostic. The abstraction is `GameTransport`:
+`CONNECTION`, `BYE`) stayed transport-agnostic. `GameTransport` now includes
+the WebSocket kind:
 
 ```ts
 interface GameTransport {
-  readonly kind: "memory" | "webrtc";
-  readonly status: "idle" | "connecting" | "open" | "closed" | "failed";
+  readonly kind: "memory" | "webrtc" | "websocket";
+  readonly status: TransportStatus;
   connect(): Promise<void>;
   send(message: WireMessage): void;
   subscribe(listener: (message: WireMessage) => void): () => void;
@@ -476,46 +479,42 @@ interface GameTransport {
 }
 ```
 
-A `WebSocketGameSession` would implement the same `GameSession` surface
-(`start`, `roll`, `move`, `bonusMove`, subscribe, dispose). The UI never knows
-which transport is underneath; a test already runs the same match over an
-in-memory transport and a fake WebRTC transport and asserts identical results.
+`PartySocketTransport` (`lib/party/websocket/party-socket-transport.ts`)
+implements it, and `ServerGameSession` extends the guest session with the host
+controls. The UI never knows which transport is underneath.
 
-### 9.3 What the server must do
+### 9.3 What the server does
 
-A server-authoritative loop needs:
+1. **Authentication**: the room token issued by HTTP is sent in the first WS
+   message (`AUTH`), never in a URL. The token is stored in Redis only for the
+   room TTL.
+2. **Validation**: `lib/party/authority.ts` runs the same actor → turn →
+   version → phase → legality chain on the server.
+3. **Dice**: only `ROLL` draws dice, with `crypto.getRandomValues` server-side.
+4. **Broadcast**: one authoritative snapshot per accepted action, published on
+   the room's Redis channel and delivered to every instance's local sockets.
+5. **Lifecycle**: reconnect via token, presence heartbeats, room expiry, and a
+   server-driven bot step for bots or disconnected humans.
+6. **Scale**: every instance shares the room snapshot and pub/sub channel in
+   Redis; there is no sticky routing requirement.
 
-1. **Authentication**: a per-player token issued at join, hashed at rest,
-   sent in an auth message (never in a URL).
-2. **Validation**: the same actor → turn → version → phase → legality chain,
-   now on the server.
-3. **Dice**: cryptographic randomness server-side.
-4. **Broadcast**: one authoritative snapshot per accepted action, ordered.
-5. **Lifecycle**: reconnect via token, one socket per player, replacement
-   semantics, room expiry.
-6. **Scale**: the in-memory store is single-instance. Horizontal scaling needs
-   an external store or a pub/sub bus, and sticky routing.
+### 9.4 How the Vercel constraints are handled
 
-### 9.4 Why WebSocket is *not* used for signaling today
+`upgradeWebSocket()` from `@vercel/functions` (with `ws`) performs the upgrade
+inside a function. The implementation compensates for the two limits:
 
-Next.js route handlers cannot perform an HTTP upgrade on their own. Vercel
-Functions now expose `upgradeWebSocket()` from `@vercel/functions` (with `ws`),
-so a route handler can host sockets in production. That path still has three
-costs for this app:
-
-- a connection is pinned to one function instance, and players of a room may
-  land on different instances, so rooms need an external store (Redis) for
-  presence and routing;
-- connections close at the function's maximum duration (300 s on Hobby, 800 s
-  on Pro), so every client needs reconnect logic mid-match;
-- local development requires `vc dev` rather than `next dev`.
-
-TURN solves the same underlying problem (a peer that cannot be reached
-directly) without moving gameplay to the server: the data channel and the
-host-authoritative session stay exactly the same, and the relay is transparent
-to the protocol. That is why this revision uses Cloudflare TURN instead of a
-WebSocket relay. A server-authoritative WebSocket mode remains possible later
-and would reuse `GameTransport`/`GameSession`.
+- **Pinned instance:** a room's players may land on different functions. Each
+  function subscribes to `parchis:versus:events:<code>`; every mutation reads
+  and writes the same Redis room snapshot under a per-room lock, and publishes
+  the resulting message. Local sockets are only a delivery registry.
+- **Maximum duration (300 s Hobby / 800 s Pro):** the browser transport
+  reconnects with backoff, re-AUTHs and receives a full `START` + `STATE`
+  snapshot. `PING` heartbeats (10 s) refresh presence and trigger bot advances.
+  A reconnecting human is removed from the disconnected list and resumes their
+  seat.
+- **Local development:** `next dev` cannot upgrade sockets in a route handler.
+  `bun run dev:ws` starts a Bun `ws` server on port 3001; the client defaults to
+  that port on local hosts and to `/api/party/socket` elsewhere.
 
 ---
 
@@ -527,41 +526,44 @@ silently degrades into another mode.
 | Failure | Cause | UX |
 | --- | --- | --- |
 | `insecure-context` | Not HTTPS and not installed | Explains secure-context requirement |
-| `no-webrtc` | No `RTCPeerConnection` | Suggests an updated browser |
+| `no-websocket` | No browser `WebSocket` | Suggests an updated browser |
 | `offline` | `navigator.onLine === false` | Asks for a connection |
-| `server-unreachable` | Signaling fetch fails | Retry |
+| `server-unreachable` | Room request or WS `AUTH` fails | Retry |
+| `STORE_UNAVAILABLE` / WS `server-error` | Redis unavailable or overloaded | Retry |
 | `room-not-found` | Wrong/expired code | Ask the host for a new code |
 | `room-full` | No free seat | Room is complete |
-| `room-closed` | Host left | Match ended |
+| `room-started` | Join after the host started | Ask for a new room |
+| `room-closed` | Host left, or the room expired | Match ended |
 | `bad-code` | Not 6 characters | Correct the code |
-| `ice-failed` | No working candidate pair, including TURN (blocked network, TURN unreachable) | Explains that some networks block direct and relayed connections |
-| `timeout` | 20 s without a data channel | Retry |
-| `host-left` | Host disconnected | Match ended |
-| `peer-left` | A guest disconnected | Play continues with the host controlling the seat |
+| `timeout` | No WS `AUTH_OK` within 20 s | Retry |
+| Legacy `no-webrtc` / `ice-failed` / `host-left` / `peer-left` | WebRTC path only | Kept for the legacy screens/tests |
 
-The `timeout` is 20 seconds: long enough for slow ICE gathering on mobile,
-short enough that a user is not left staring at a spinner.
+The WebSocket connect timeout is 20 seconds: long enough for a cold serverless
+function, short enough that a user is not left staring at a spinner. The legacy
+WebRTC path keeps its 20-second data-channel timeout.
 
 ---
 
 ## 11. Security
 
-- **Transport encryption**: DTLS provides encryption and certificate
-  fingerprints authenticate the far end.
-- **Signaling**: tokens authenticate every POST/GET. Tokens are 32 random
-  bytes, pattern-validated, sent in headers or bodies, never in URLs or logs.
+- **Transport encryption**: WSS (TLS) protects the party socket; the legacy
+  WebRTC path uses DTLS and certificate fingerprints.
+- **Authentication**: tokens are 32 random bytes, pattern-validated, issued by
+  HTTP create/join and sent in the WS `AUTH` message. They never appear in a
+  URL or a log. The Redis room snapshot stores them raw for the room TTL.
 - **Input validation**: every inbound message is structurally validated;
   avatars are allowlisted paths; names are bounded; action shapes reject extra
   keys.
-- **No secrets in the client**: there is no API key. The signaling server
-  stores no credentials beyond the ephemeral room.
-- **Ephemeral persistence**: rooms, relayed signals and peer tokens live in
-  Redis only for the room TTL (30 min active, 10 min guest-less) and are
-  deleted afterwards. Game state never reaches the server, and the Redis
-  credentials stay server-side.
+- **No secrets in the client**: there is no API key. The Cloudflare TURN token
+  stays server-side for the legacy path.
+- **Ephemeral persistence**: rooms, signals, profiles, presence, game state and
+  peer tokens live in Redis only for the room TTL (30 min active, 10 min
+  guest-less) and are deleted afterwards. The Redis credentials stay
+  server-side.
 - **No logging of payloads**: SDP, tokens and game state are never logged.
-- **Trust statement**: guests trust the host's dice and state. Do not use this
-  mode for competitive or ranked play without an authoritative server.
+- **Trust statement**: the implemented mode is server-authoritative. The
+  legacy peer-to-peer mode trusted the host's dice and state; it is not used by
+  the UI.
 
 ---
 
@@ -596,15 +598,22 @@ short enough that a user is not left staring at a spinner.
 | `lib/party/connection-copy.ts` | Spanish copy for the per-seat connection mode |
 | `lib/server/versus/turn.ts` | Server-only Cloudflare TURN credential minting |
 | `app/api/ice/route.ts` | `GET /api/ice`; caches credentials, never exposes the API token |
-| `lib/party/webrtc/support.ts` | Secure-context and API screening |
-| `lib/party/sessions/webrtc-host-session.ts` | Authoritative host: one transport per guest, bots |
-| `lib/party/sessions/webrtc-guest-session.ts` | Intent sender, snapshot adopter |
-| `lib/party/versus/signaling-client.ts` | Capacity, targeted signals, presence, polling |
-| `lib/party/versus/description.ts` | SDP JSON codec + validation |
+| `lib/party/webrtc/support.ts` | Secure-context + `WebSocket` screening (path retained from the legacy module) |
+| `lib/party/websocket/party-socket-transport.ts` | Browser party socket: AUTH, reconnect, heartbeat |
+| `lib/party/websocket/messages.ts` | Socket control envelope and auth validation |
+| `lib/party/sessions/server-game-session.ts` | Client session over the WS relay, host controls |
+| `lib/party/sessions/webrtc-host-session.ts` | Legacy host session: one transport per guest, bots |
+| `lib/party/sessions/webrtc-guest-session.ts` | Legacy intent sender, snapshot adopter |
+| `lib/party/versus/signaling-client.ts` | HTTP room create/join; legacy signal/poll helpers |
+| `lib/party/versus/description.ts` | Legacy SDP JSON codec + validation |
 | `lib/party/versus/lobby.ts` | Pure lobby state machine and Spanish copy |
 | `lib/server/versus/rooms.ts` | Pure room rules, serialization, tokens, TTLs, caps and the in-memory store (tests) |
-| `lib/server/versus/redis-store.ts` | Redis-backed room store used by the route: connection singleton, per-room locks, TTLs |
-| `app/api/versus/route.ts` | HTTP signaling endpoint |
+| `lib/server/versus/redis-store.ts` | Redis-backed room store: connection singleton, per-room locks, TTLs, party mutations |
+| `lib/server/versus/party-state.ts` | Pure authoritative lobby/game/bot state over a room snapshot |
+| `lib/server/versus/ws-party.ts` | WS handler, Redis pub/sub, local socket registry, bot timers |
+| `app/api/versus/route.ts` | HTTP room allocation + legacy signaling endpoint |
+| `app/api/party/socket/route.ts` | Vercel WebSocket upgrade route |
+| `scripts/party-ws-server.ts` | Local Bun WebSocket server (`bun run dev:ws`) |
 
 ---
 
@@ -631,25 +640,35 @@ short enough that a user is not left staring at a spinner.
   clamp), and the browser fallback to STUN.
 - **Connection mode**: selected candidate pair from fake `getStats()` reports
   (transport report, nominated pair, unknown type, retry while nominating) and
-  the host → guest `CONNECTION` broadcast.
+  the host → guest `CONNECTION` broadcast (legacy).
+- **Authoritative party state**: host-only start and seat changes, roster and
+  empty seats, off-turn/stale action rejection, a bot step, a disconnected
+  human being played by the server and reclaiming the seat, host leave, and a
+  full room round-trip through serialization.
+- **Party socket transport**: fake-WebSocket tests for AUTH, wire delivery,
+  close and auth rejection.
+- **End-to-end (development):** real HTTP + two `bun run dev:ws` processes
+  sharing Redis: create, join, lobby, start, action, reconnect snapshot and
+  leave; cross-instance `LOBBY`/`START`/`STATE`/`BYE` through Redis pub/sub.
 
-No test opens a real peer connection to a remote host; the structural fakes
-prove the logic, and browser checks prove the wiring.
+The committed tests use fakes; the WebSocket path was also exercised with two
+real server processes and the real Redis instance during development.
 
 ---
 
 ## 15. Open questions and future work
 
-- **TURN**: implemented through Cloudflare Realtime with short-lived,
-  server-minted credentials. The remaining cost is Cloudflare bandwidth when a
-  match is relayed; the UI shows when that happens.
-- **WebSocket signaling**: an alternative once a custom Node server exists.
-  It would remove polling but not change ICE or the session layer.
-- **Server-authoritative mode**: planned; the transport and session
-  abstractions already allow it without touching `GameStage`.
-- **Host migration**: not implemented. If the host leaves, the room closes.
-- **Reconnection**: a guest that drops mid-match is played by the host; it
-  cannot currently rejoin.
-- **Scale**: rooms are shared through one Redis instance, so the signaling
-  route is horizontally scalable. Per-instance Redis connections and the free
-  tier's connection limit remain the practical ceiling.
+- **TURN (legacy)**: the Cloudflare Realtime TURN route remains for the old
+  WebRTC path; the UI no longer uses it.
+- **WebSocket mode**: implemented with `upgradeWebSocket()` from
+  `@vercel/functions`, Redis state, Redis pub/sub and automatic reconnection.
+- **Rate limiting**: authenticated actions are validated for actor, turn,
+  version and phase but are not rate-limited; a Redis-backed limiter is the
+  natural next step.
+- **Host migration**: not implemented. An intentional host leave closes the
+  room; a host whose socket drops is played by the server and can reconnect.
+- **Reconnection**: clients reconnect automatically and receive the full
+  snapshot. There is no grace period before a disconnected seat is automated.
+- **Scale**: rooms are shared through one Redis instance, so the WS route is
+  horizontally scalable through pub/sub. Per-instance Redis connections and the
+  free tier's connection limit remain the practical ceiling.

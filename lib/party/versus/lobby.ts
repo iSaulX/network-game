@@ -23,7 +23,7 @@ export type LobbyPhase =
 export type LobbyFailure =
   | "offline"
   | "insecure-context"
-  | "no-webrtc"
+  | "no-websocket"
   | "server-unreachable"
   | "room-not-found"
   | "room-full"
@@ -86,7 +86,7 @@ export type LobbyEvent =
 const FAILURES: ReadonlySet<string> = new Set<LobbyFailure>([
   "offline",
   "insecure-context",
-  "no-webrtc",
+  "no-websocket",
   "server-unreachable",
   "room-not-found",
   "room-full",
@@ -106,8 +106,8 @@ export const LOBBY_FAILURE_COPY: Readonly<Record<LobbyFailure, string>> =
       "No hay conexión. Para jugar en línea hace falta internet.",
     "insecure-context":
       "Este modo necesita una conexión segura (HTTPS) o la app instalada.",
-    "no-webrtc":
-      "Este navegador no permite conexiones directas entre dispositivos. Prueba con Chrome, Edge, Safari o Firefox actualizados.",
+    "no-websocket":
+      "Este navegador no permite la conexión en tiempo real. Prueba con Chrome, Edge, Safari o Firefox actualizados.",
     "server-unreachable":
       "No se pudo contactar con el servidor de partidas. Vuelve a intentarlo.",
     "room-not-found":
@@ -271,7 +271,7 @@ export function describeLobby(state: LobbyState): LobbyDescription {
     case "joining":
       return {
         title: "Conectando con la partida…",
-        detail: "Estamos buscando al anfitrión y abriendo la conexión.",
+        detail: "Estamos contactando con el servidor de la partida.",
         tone: "info",
       };
     case "guest-lobby":
@@ -288,7 +288,9 @@ export function describeLobby(state: LobbyState): LobbyDescription {
     case "failed":
       return {
         title: "No se pudo conectar",
-        detail: LOBBY_FAILURE_COPY["ice-failed"],
+        detail: state.failure
+          ? LOBBY_FAILURE_COPY[state.failure]
+          : LOBBY_FAILURE_COPY["server-unreachable"],
         tone: "error",
       };
   }

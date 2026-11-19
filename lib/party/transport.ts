@@ -16,7 +16,7 @@ export type TransportStatus =
   | "closed"
   | "failed";
 
-export type TransportKind = "memory" | "webrtc";
+export type TransportKind = "memory" | "webrtc" | "websocket";
 
 /** Outbound messages are queued while connecting, up to this many. */
 const MAX_QUEUED_MESSAGES = 32;

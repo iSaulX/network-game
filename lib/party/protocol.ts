@@ -52,8 +52,8 @@ export interface LanRoster {
 /** ICE candidate type actually selected for a peer's link. */
 export type IceCandidateType = "host" | "srflx" | "prflx" | "relay" | "unknown";
 
-/** How a seat is connected: a direct WebRTC channel or the in-memory test pair. */
-export type SeatTransport = "webrtc" | "memory";
+/** How a seat is connected: a direct WebRTC channel, the server relay or the in-memory test pair. */
+export type SeatTransport = "webrtc" | "websocket" | "memory";
 
 export interface SeatConnection {
   readonly transport: SeatTransport;
@@ -164,7 +164,7 @@ const CANDIDATE_TYPES = new Set<string>([
   "relay",
   "unknown",
 ]);
-const SEAT_TRANSPORTS = new Set<string>(["webrtc", "memory"]);
+const SEAT_TRANSPORTS = new Set<string>(["webrtc", "websocket", "memory"]);
 const ERROR_CODES = new Set<string>([
   "PROTOCOL_MISMATCH",
   "BAD_MESSAGE",
@@ -318,7 +318,7 @@ function isConnectionMap(
   );
 }
 
-function isLanPlayerInfo(value: unknown): value is LanPlayerInfo {
+export function isLanPlayerInfo(value: unknown): value is LanPlayerInfo {
   return (
     isRecord(value) &&
     isPlayerId(value.id) &&
@@ -374,7 +374,7 @@ function isEmptySeatList(
   return (value as string[]).every((item) => !occupied.has(item));
 }
 
-function isRoster(value: unknown): value is LanRoster {
+export function isRoster(value: unknown): value is LanRoster {
   if (!isRecord(value) || !Array.isArray(value.players)) {
     return false;
   }
@@ -391,7 +391,7 @@ function isRoster(value: unknown): value is LanRoster {
   );
 }
 
-function isGameState(value: unknown): value is GameState {
+export function isGameState(value: unknown): value is GameState {
   return (
     isRecord(value) &&
     value.schemaVersion === 2 &&

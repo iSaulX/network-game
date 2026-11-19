@@ -16,6 +16,10 @@ export function describeSeatConnection(
     return null;
   }
 
+  if (connection.transport === "websocket") {
+    return "Conexión por servidor · WebSocket";
+  }
+
   switch (connection.candidate) {
     case "host":
       return "Conexión directa · host";

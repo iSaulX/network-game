@@ -18,6 +18,7 @@
 import { randomBytes } from "node:crypto";
 import { createClient } from "redis";
 import {
+  authorizeRoom,
   createRoomState,
   deserializeRoom,
   isRoomExpired,
@@ -79,6 +80,12 @@ export interface RedisVersusServerOptions {
   readonly lockWaitMs?: number;
 }
 
+/** One party mutation and whether it must be written back to Redis. */
+export interface PartyRoomMutation<T> {
+  readonly value: T;
+  readonly persist: boolean;
+}
+
 /** The asynchronous equivalent of `VersusServer`, used by the route handler. */
 export interface AsyncVersusServer {
   create(capacity?: VersusCapacity): Promise<VersusResult<VersusCredentials>>;
@@ -99,6 +106,16 @@ export interface AsyncVersusServer {
   markStarted(
     credentials: VersusPeer & { code: string },
   ): Promise<VersusResult<null>>;
+  /** Authorized read-modify-write of the room's party state. */
+  mutateParty<T>(
+    credentials: VersusPeer & { code: string },
+    action: (room: VersusRoom, time: number) => PartyRoomMutation<T>,
+  ): Promise<VersusResult<T>>;
+  /** Same, for server-driven work (bot steps) with no peer token. */
+  mutatePartyAsServer<T>(
+    code: string,
+    action: (room: VersusRoom, time: number) => PartyRoomMutation<T>,
+  ): Promise<VersusResult<T>>;
 }
 
 interface RoomActionOutcome<T> {
@@ -307,7 +324,46 @@ export function createRedisVersusServer(
       return { result, persist: result.ok };
     });
 
-  return { create, join, send, poll, leave, markStarted };
+  const mutateParty = <T>(
+    credentials: VersusPeer & { code: string },
+    action: (room: VersusRoom, time: number) => PartyRoomMutation<T>,
+  ): Promise<VersusResult<T>> =>
+    withRoom(credentials.code, (room, time) => {
+      const error = authorizeRoom(room, credentials);
+
+      if (error) {
+        return { result: { ok: false as const, error }, persist: false };
+      }
+
+      const mutation = action(room, time);
+      return {
+        result: { ok: true as const, value: mutation.value },
+        persist: mutation.persist,
+      };
+    });
+
+  const mutatePartyAsServer = <T>(
+    code: string,
+    action: (room: VersusRoom, time: number) => PartyRoomMutation<T>,
+  ): Promise<VersusResult<T>> =>
+    withRoom(code, (room, time) => {
+      const mutation = action(room, time);
+      return {
+        result: { ok: true as const, value: mutation.value },
+        persist: mutation.persist,
+      };
+    });
+
+  return {
+    create,
+    join,
+    send,
+    poll,
+    leave,
+    markStarted,
+    mutateParty,
+    mutatePartyAsServer,
+  };
 }
 
 type RedisClient = Awaited<ReturnType<typeof connectRedis>>;

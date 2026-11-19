@@ -27,6 +27,9 @@ const nextConfig: NextConfig = {
     : {
         cacheComponents: true,
         partialPrefetching: true,
+        // `@vercel/functions` dynamically imports `ws` during the upgrade;
+        // keep it external so the serverless bundle resolves the dependency.
+        serverExternalPackages: ["ws"],
       }),
   turbopack: {
     root: __dirname,

@@ -123,7 +123,9 @@ export class WebRTCGuestSession extends GameSession {
   }
 
   /** Guests cannot change the room's seats; the host owns the lobby. */
-  setSeatEmpty(): void {
+  setSeatEmpty(seatId?: string, empty?: boolean): void {
+    void seatId;
+    void empty;
     throw new GameSessionError("GUEST_CANNOT_START");
   }
 

@@ -12,6 +12,13 @@
  * logged.
  */
 import { randomBytes } from "node:crypto";
+import {
+  isGameState,
+  isLanPlayerInfo,
+  isRoster,
+  type LanPlayerInfo,
+} from "@/lib/party/protocol";
+import type { PartyRoomState } from "./party-state";
 
 export type VersusRole = "host" | "guest";
 
@@ -138,6 +145,8 @@ export interface VersusRoom {
   epochCounter: number;
   readonly peers: Map<string, StoredPeer>;
   readonly signals: VersusSignal[];
+  /** Server-authoritative lobby and game state, once a socket connects. */
+  party?: PartyRoomState;
 }
 
 export interface VersusServerOptions {
@@ -266,9 +275,19 @@ export function pruneRoomSignals(room: VersusRoom, time: number): void {
 }
 
 function roomDeadline(room: VersusRoom): number {
-  // Without a guest the room is only useful while someone could still join,
-  // so it is aged from creation: polling alone cannot keep a guest-less room
-  // alive forever.
+  // A party with connected sockets or a running match is kept alive by its
+  // heartbeats even when the signaling room seats no guest (a solo game
+  // vs bots, for example). Plain signaling rooms keep the old empty-room
+  // rule so polling alone cannot keep an abandoned room alive forever.
+  const partyActive =
+    room.party !== undefined &&
+    (room.party.game !== null ||
+      Object.keys(room.party.presence).length > 0);
+
+  if (partyActive) {
+    return room.touchedAt + ROOM_TTL_MS;
+  }
+
   return guestsInRoom(room).length > 0
     ? room.touchedAt + ROOM_TTL_MS
     : room.createdAt + EMPTY_ROOM_TTL_MS;
@@ -616,6 +635,7 @@ interface SerializedRoom {
   readonly epochCounter: number;
   readonly peers: ReadonlyArray<readonly [string, StoredPeer]>;
   readonly signals: readonly VersusSignal[];
+  readonly party?: PartyRoomState;
 }
 
 /** JSON-safe form of a room; Maps are not representable in JSON. */
@@ -631,6 +651,7 @@ export function serializeRoom(room: VersusRoom): string {
     epochCounter: room.epochCounter,
     peers: [...room.peers.entries()],
     signals: room.signals,
+    ...(room.party ? { party: room.party } : {}),
   };
 
   return JSON.stringify(stored);
@@ -642,6 +663,101 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isHumanSeatId(value: string): boolean {
+  return value === "host" || isGuestSeatId(value);
+}
+
+/**
+ * Validates the optional server-authoritative state. `undefined` means the
+ * room was written before the feature existed; `null` means the stored value
+ * is corrupt, and the caller treats the whole room as missing.
+ */
+function readPartyState(
+  value: unknown,
+): PartyRoomState | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const {
+    mode,
+    profiles,
+    presence,
+    emptySeats,
+    version,
+    game,
+    roster,
+    events,
+    disconnected,
+    botDueAt,
+    updatedAt,
+  } = value;
+
+  if (
+    (mode !== "1v1" && mode !== "all") ||
+    !isRecord(profiles) ||
+    !isRecord(presence) ||
+    !Array.isArray(emptySeats) ||
+    !emptySeats.every(
+      (seat) => typeof seat === "string" && isGuestSeatId(seat),
+    ) ||
+    !isFiniteNumber(version) ||
+    (game !== null && !isGameState(game)) ||
+    (roster !== null && !isRoster(roster)) ||
+    !Array.isArray(events) ||
+    !Array.isArray(disconnected) ||
+    !disconnected.every(
+      (seat) => typeof seat === "string" && isHumanSeatId(seat),
+    ) ||
+    (botDueAt !== null && !isFiniteNumber(botDueAt)) ||
+    !isFiniteNumber(updatedAt)
+  ) {
+    return null;
+  }
+
+  const parsedProfiles: Record<string, LanPlayerInfo> = {};
+
+  for (const [id, profile] of Object.entries(profiles)) {
+    if (
+      !isHumanSeatId(id) ||
+      !isLanPlayerInfo(profile) ||
+      profile.id !== id
+    ) {
+      return null;
+    }
+
+    parsedProfiles[id] = profile;
+  }
+
+  const parsedPresence: Record<string, number> = {};
+
+  for (const [id, at] of Object.entries(presence)) {
+    if (!isHumanSeatId(id) || !isFiniteNumber(at)) {
+      return null;
+    }
+
+    parsedPresence[id] = at;
+  }
+
+  return {
+    mode,
+    profiles: parsedProfiles,
+    presence: parsedPresence,
+    emptySeats: emptySeats as string[],
+    version,
+    game,
+    roster,
+    events: events as PartyRoomState["events"],
+    disconnected: disconnected as string[],
+    botDueAt,
+    updatedAt,
+  };
 }
 
 /**
@@ -672,6 +788,7 @@ export function deserializeRoom(raw: string): VersusRoom | null {
     epochCounter,
     peers,
     signals,
+    party,
   } = parsed;
 
   if (
@@ -770,6 +887,12 @@ export function deserializeRoom(raw: string): VersusRoom | null {
     });
   }
 
+  const partyState = readPartyState(party);
+
+  if (partyState === null) {
+    return null;
+  }
+
   return {
     code,
     capacity,
@@ -781,6 +904,7 @@ export function deserializeRoom(raw: string): VersusRoom | null {
     epochCounter,
     peers: peerMap,
     signals: storedSignals,
+    ...(partyState ? { party: partyState } : {}),
   };
 }
 
